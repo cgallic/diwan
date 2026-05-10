@@ -35,10 +35,10 @@ Source of truth for the 9-day hackathon build (May 10–18, 2026; submit May 18;
 
 ## D2 — Tuesday May 12 (ledger lock + 20-attack catalogue)
 
-- [ ] **T3.1** Lock the ledger schema (no more changes after today). Add SQL views for: `trace_summary`, `attack_run_summary`.
-- [ ] **T3.2** Expand attack catalogue from 5 → 20 attacks. Seed: `gauntlet/attacks/` directory, one JSON per attack. Spec: [`.build/components/gauntlet.md`](./.build/components/gauntlet.md). Pattern-replicate from the 5 documented attacks (in private wiki, also see public catalogue stub).
-- [ ] **T3.3** Each attack: trigger prompt + expected unguarded behavior + which policy rule (if any) catches it.
-- [ ] **T3.4** Vulnerable-agent variant: `agent-harness` accepts an env var `DIWAN_DISABLE_GUARDS=1` that skips Zehrava and runs raw against the model — used to baseline the gauntlet.
+- [x] **T3.1** Lock the ledger schema (no more changes after today). Add SQL views for: `trace_summary`, `attack_run_summary`. *11/11 tests pass; 2 D3 flags noted (duplicate_blocked not counted as denial; human_review_pending is trace-scoped not intent-scoped).*
+- [x] **T3.2** Expand attack catalogue from 5 → 20 attacks. Seed: `gauntlet/attacks/` directory, one JSON per attack. Spec: [`.build/components/gauntlet.md`](./.build/components/gauntlet.md). Pattern-replicate from the 5 documented attacks (in private wiki, also see public catalogue stub). *20/20 with real public incident anchors; categories all hit; 3 stretches flagged for D3.*
+- [x] **T3.3** Each attack: trigger prompt + expected unguarded behavior + which policy rule (if any) catches it. *Covered by T3.2 schema — every JSON has trigger_prompt + expected_unguarded_behavior + matching_template.*
+- [x] **T3.4** Vulnerable-agent variant: `agent-harness` accepts an env var `DIWAN_DISABLE_GUARDS=1` that skips Zehrava and runs raw against the model — used to baseline the gauntlet. *Covered by T1.5 — flag implemented in agent-harness.*
 
 **D2 done when**: 20 attack JSON files exist; running each manually produces a fail (unguarded) and a different result (guarded).
 
@@ -57,7 +57,7 @@ Source of truth for the 9-day hackathon build (May 10–18, 2026; submit May 18;
 
 ## D4 — Thursday May 14 (template policy suggester + before/after)
 
-- [ ] **T5.1** `gauntlet/templates/*.yaml` — 20 Lobster Trap policy template scaffolds keyed to attack patterns (one per attack class). Each has placeholders for detected metadata (target_domains, target_commands, etc.).
+- [x] **T5.1** `gauntlet/templates/*.yaml` — 20 Lobster Trap policy template scaffolds keyed to attack patterns (one per attack class). Each has placeholders for detected metadata (target_domains, target_commands, etc.). *6 base + 14 specialized; 6/20 with placeholders; 1,137 LoC; all parse + field-validate.*
 - [ ] **T5.2** `diwan preflight suggest-policies <run_id>` — for each failed attack, instantiate the matching template with detected metadata from the ledger, write to `policies/suggested-<run_id>/`.
 - [ ] **T5.3** `diwan preflight rerun <baseline_run_id>` — restarts Lobster Trap with `policies/agent-safety.yaml` + `policies/suggested-<run_id>/*`, fires the same attacks, new run_id.
 - [ ] **T5.4** Before/after diff: `diwan preflight diff <run_id_a> <run_id_b>` → JSON + table.
