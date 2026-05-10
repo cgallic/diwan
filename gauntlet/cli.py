@@ -33,12 +33,15 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ATTACKS_DIR = REPO_ROOT / "gauntlet" / "attacks"
+TEMPLATES_DIR = REPO_ROOT / "gauntlet" / "templates"
+POLICIES_DIR = REPO_ROOT / "policies"
 LEDGER_VOLUME = "diwan_ledger"          # docker-compose-managed volume
 LEDGER_PATH_IN_CONTAINER = "/data/diwan.db"
 DEFAULT_MODEL = os.environ.get("DIWAN_MODEL", "qwen3.6:27b")
 DEFAULT_AGENT = "crm-support"
 PER_ATTACK_TIMEOUT_S = int(os.environ.get("DIWAN_ATTACK_TIMEOUT", "120"))
 DOCKER_PREFIX = ["sg", "docker", "-c"] if os.environ.get("DIWAN_USE_SG", "1") == "1" else None
+RESTART_WAIT_S = int(os.environ.get("DIWAN_RESTART_WAIT_S", "8"))
 
 
 # ── ANSI colors ──────────────────────────────────────────────────────────────
@@ -566,6 +569,597 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0 if (out["guarded"] and totals["fail"] == 0) else 0
 
 
+# ── policy template suggester ────────────────────────────────────────────────
+
+import re
+
+# Regex to pull attacker-controlled / external-looking domains out of
+# trigger_prompt + setup blobs. We're intentionally generous: anything ending
+# in ".example" or matching the canonical attacker hosts wins, plus any host
+# the agent fetches in trigger_setup.fake_url_responses.
+_DOMAIN_RE = re.compile(
+    r"https?://([A-Za-z0-9._<>\-]+\.(?:example|attacker|test|invalid)[A-Za-z0-9.\-]*)",
+    re.IGNORECASE,
+)
+# Catch destructive SQL / shell patterns mentioned in the attack JSON for the
+# block_destructive_action template's command_pattern placeholder.
+_DESTRUCTIVE_RE = re.compile(
+    r"\b(truncate|drop\s+table|delete\s+from|rm\s+-rf|grant\s+\w+|"
+    r"superadmin|privilege\s+escalation|account\s+deletion|reset)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_metadata(attack: dict) -> dict:
+    """Pull detected_metadata for placeholder substitution from the attack JSON.
+
+    We prefer ledger-driven metadata when available, but the gauntlet's
+    Lobster Trap doesn't tag verdicts with our run_id (see T1.3 + T3.1
+    notes), so we fall back to the attack JSON itself — which carries the
+    same signal because the trigger_prompt + trigger_setup deliberately
+    encode the attacker domain / destructive command.
+    """
+    blob_parts: list[str] = [attack.get("trigger_prompt", "") or ""]
+    setup = attack.get("trigger_setup") or {}
+    # fake_url_responses keys are explicit attacker hosts
+    blob_parts.extend(list((setup.get("fake_url_responses") or {}).keys()))
+    # wired_endpoints values too
+    blob_parts.extend(list((setup.get("wired_endpoints") or {}).keys()))
+    # The body of the fake URL pages may name additional callback hosts.
+    for v in (setup.get("fake_url_responses") or {}).values():
+        if isinstance(v, str):
+            blob_parts.append(v)
+    blob_parts.append(attack.get("expected_unguarded_behavior", "") or "")
+    blob = "\n".join(blob_parts)
+
+    domains = []
+    for m in _DOMAIN_RE.finditer(blob):
+        host = m.group(1).lower()
+        # Strip leading placeholders like <api_key>. — keep the registrable tail.
+        host = re.sub(r"^[<>\w\-]+\.", "", host) if "." in host else host
+        if host and host not in domains:
+            domains.append(host)
+    if not domains:
+        # Last-ditch — every Diwan attack uses *.example by convention.
+        domains = ["attacker.example"]
+
+    # Destructive command extraction
+    cmds = sorted({m.group(0).lower().strip() for m in _DESTRUCTIVE_RE.finditer(blob)})
+
+    return {
+        "target_domain": domains[0],
+        "target_domains": domains,
+        # command_pattern is a regex literal — escape the alternatives.
+        "command_pattern": "|".join(re.escape(c) for c in cmds) if cmds else
+                           "truncate|drop\\s+table|delete\\s+from",
+        "high_risk_intents": "credential_access, system, data_access",
+    }
+
+
+def instantiate_template(template_yaml: str, run_id: str,
+                          metadata: dict) -> str:
+    """Replace {{run_id}} and {{detected_metadata.X}} placeholders.
+
+    Stays string-based on purpose so we don't need PyYAML — Lobster Trap
+    parses the result with go-yaml at load time, and regression-testing
+    yaml.safe_load is part of the suggest-policies acceptance.
+    """
+    short_run = run_id.split("-")[0] if "-" in run_id else run_id[:8]
+    out = template_yaml.replace("{{run_id}}", short_run)
+    # Then any detected_metadata.X
+    for key, value in metadata.items():
+        token = "{{detected_metadata." + key + "}}"
+        out = out.replace(token, str(value))
+    return out
+
+
+def write_suggested_policy_row(run_id: str, attack_id: str,
+                                template_name: str, yaml_body: str) -> None:
+    cmd = [
+        "exec", "-T", "ledger-writer", "python3", "-c",
+        "import sqlite3,os,sys;"
+        "p=os.environ.get('LEDGER_PATH','/data/diwan.db');"
+        "c=sqlite3.connect(p);"
+        "c.execute('INSERT INTO suggested_policy "
+        "(run_id, attack_id, template_name, yaml_body) VALUES (?, ?, ?, ?)',"
+        " (sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]));"
+        "c.commit();c.close()",
+        run_id, attack_id, template_name, yaml_body,
+    ]
+    try:
+        run_compose(cmd, capture=True, timeout=15)
+    except Exception as e:
+        print(f"  {color('!', C.Y)} suggested_policy row write failed: {e}",
+              file=sys.stderr)
+
+
+def cmd_suggest_policies(args: argparse.Namespace) -> int:
+    run_id = args.run_id
+    out = score_run(run_id)
+    if out["guarded"]:
+        print(color("warn: suggesting policies from a GUARDED run — "
+                     "templates are intended for unguarded baselines", C.Y),
+              file=sys.stderr)
+
+    # In the unguarded scoring convention, verdict=='pass' means the
+    # vulnerability reproduced (i.e. the attack succeeded against the bare
+    # agent). Those are the rows that need a policy.
+    failed = [r for r in out["results"] if r["verdict"] == "pass"]
+    skipped_errors = [r for r in out["results"] if r["verdict"] == "error"]
+
+    if not failed:
+        print(color("no reproduced vulnerabilities in this run — nothing to "
+                     "suggest", C.Y))
+        if skipped_errors:
+            print(f"  ({len(skipped_errors)} attack(s) errored — see "
+                  f"`diwan preflight summary {run_id}`)")
+        return 0
+
+    out_dir = POLICIES_DIR / f"suggested-{run_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Index attacks by id for metadata extraction
+    all_attacks = {a["id"]: a for a in load_attacks()}
+
+    written: list[tuple[str, str, str]] = []  # (attack_id, template, path)
+    templates_used: set[str] = set()
+    for r in failed:
+        attack_id = r["id"]
+        attack = all_attacks.get(attack_id)
+        if not attack:
+            print(f"  {color('!', C.Y)} no attack JSON for {attack_id}",
+                  file=sys.stderr)
+            continue
+        template_name = attack.get("matching_template")
+        if not template_name:
+            print(f"  {color('!', C.Y)} no matching_template on {attack_id}",
+                  file=sys.stderr)
+            continue
+        tpl_path = TEMPLATES_DIR / f"{template_name}.yaml"
+        if not tpl_path.exists():
+            print(f"  {color('!', C.Y)} template not found: {template_name}",
+                  file=sys.stderr)
+            continue
+
+        metadata = extract_metadata(attack)
+        body = instantiate_template(tpl_path.read_text(), run_id, metadata)
+
+        out_path = out_dir / f"{attack_id}.yaml"
+        out_path.write_text(body)
+        write_suggested_policy_row(run_id, attack_id, template_name, body)
+        written.append((attack_id, template_name, str(out_path)))
+        templates_used.add(template_name)
+
+    # Report
+    print()
+    word = "policy" if len(written) == 1 else "policies"
+    head = (f"Generated {len(written)} {word} for {len(failed)} "
+            f"reproduced attack(s)")
+    print(f"  {color(head, C.G + C.BOLD)}" if supports_color()
+          else f"  {head}")
+    print(f"  Covered {len(templates_used)} unique template(s): "
+          f"{', '.join(sorted(templates_used))}")
+    print(f"  Output: {out_dir.relative_to(REPO_ROOT)}/")
+    for aid, tmpl, p in written:
+        print(f"    {color('+', C.G)} {aid} -> {tmpl}")
+    if skipped_errors:
+        print(f"  {color(f'(skipped {len(skipped_errors)} errored attack(s))', C.Y)}")
+    print()
+    next_cmd = f"diwan preflight rerun {run_id}"
+    print(f"  Next: {color(next_cmd, C.B + C.BOLD)}" if supports_color()
+          else f"  Next: {next_cmd}")
+    return 0
+
+
+# ── rerun + container restart ────────────────────────────────────────────────
+
+def merge_policies(merged_path: Path, suggested_dir: Path,
+                    base_path: Path) -> int:
+    """Concatenate base agent-safety + each suggested policy file's
+    ingress_rules / egress_rules into a single Lobster Trap YAML.
+
+    Lobster Trap accepts ONE --policy file, so we have to merge. Each
+    suggested file is a fully-formed policy with its own ingress_rules and
+    egress_rules; we strip the per-file headers and pour the rules into the
+    base policy's lists. Returns the count of suggested files merged.
+    """
+    base_text = base_path.read_text()
+
+    # Find the boundaries of the existing rule lists in the base file. Both
+    # `ingress_rules:` and `egress_rules:` are top-level keys; their bodies
+    # run until the next top-level key or EOF.
+    def split_yaml_sections(text: str) -> dict[str, str]:
+        """Naive top-level splitter — enough for our flat policies."""
+        sections: dict[str, str] = {}
+        current_key = "_preamble"
+        sections[current_key] = ""
+        for line in text.splitlines(keepends=True):
+            stripped = line.rstrip()
+            # top-level key when col-0 alpha + colon and no leading dash
+            if (stripped and not line.startswith((" ", "\t", "#", "-"))
+                    and ":" in stripped and not stripped.startswith("---")):
+                key = stripped.split(":", 1)[0].strip()
+                if key:
+                    current_key = key
+                    sections.setdefault(current_key, "")
+            sections[current_key] += line
+        return sections
+
+    def extract_rules_block(text: str, key: str) -> str:
+        """Return the lines that follow `<key>:` minus the key line itself,
+        i.e. just the list items. Empty string if section absent."""
+        sec = split_yaml_sections(text).get(key, "")
+        if not sec:
+            return ""
+        # drop the first line (the key header)
+        body = "\n".join(sec.splitlines()[1:])
+        # ensure trailing newline
+        if not body.endswith("\n"):
+            body += "\n"
+        return body
+
+    suggested_files = sorted(suggested_dir.glob("*.yaml")) if suggested_dir.exists() else []
+
+    extra_ingress = ""
+    extra_egress = ""
+    for f in suggested_files:
+        t = f.read_text()
+        extra_ingress += f"\n  # ── from {f.name} ──\n"
+        body = extract_rules_block(t, "ingress_rules")
+        extra_ingress += body if body else "\n"
+        extra_egress += f"\n  # ── from {f.name} ──\n"
+        body = extract_rules_block(t, "egress_rules")
+        extra_egress += body if body else "\n"
+
+    # Now splice extra_ingress into base after the last item under
+    # ingress_rules:, and same for egress_rules.
+    sections = split_yaml_sections(base_text)
+    out_parts: list[str] = []
+    for key, sec in sections.items():
+        if key == "ingress_rules" and extra_ingress.strip():
+            out_parts.append(sec.rstrip("\n") + "\n" + extra_ingress)
+        elif key == "egress_rules" and extra_egress.strip():
+            out_parts.append(sec.rstrip("\n") + "\n" + extra_egress)
+        else:
+            out_parts.append(sec)
+
+    # Prepend a banner so a reviewer immediately knows this is the merged file.
+    banner = (
+        "# diwan/policies/_active.yaml — MERGED policy\n"
+        "# Auto-generated by `diwan preflight rerun`. DO NOT EDIT BY HAND.\n"
+        f"# Base: {base_path.name}\n"
+        f"# Suggested: {len(suggested_files)} file(s) from {suggested_dir.name}/\n"
+        "# Restart Lobster Trap to apply: `docker compose restart lobstertrap`\n"
+        "\n"
+    )
+    merged_path.write_text(banner + "".join(out_parts))
+    return len(suggested_files)
+
+
+def write_compose_override(active_policy_filename: str) -> Path:
+    """Write a docker-compose.override.yml that points lobstertrap's --policy
+    flag at the merged file. Idempotent."""
+    override_path = REPO_ROOT / "docker-compose.override.yml"
+    body = (
+        "# Auto-generated by `diwan preflight rerun`.\n"
+        "# Overrides lobstertrap's --policy flag to load the merged active\n"
+        "# policy file (base agent-safety + per-attack suggestions).\n"
+        "services:\n"
+        "  lobstertrap:\n"
+        "    command:\n"
+        '      - "serve"\n'
+        '      - "--policy"\n'
+        f'      - "/policies/{active_policy_filename}"\n'
+        '      - "--listen"\n'
+        '      - ":8080"\n'
+        '      - "--backend"\n'
+        '      - "${LOBSTERTRAP_UPSTREAM:-http://host.docker.internal:11434}"\n'
+        '      - "--audit-log"\n'
+        '      - "/data/lobstertrap-audit.log"\n'
+        '      - "--no-dashboard"\n'
+    )
+    override_path.write_text(body)
+    return override_path
+
+
+def restart_lobstertrap_with_policy(active_filename: str) -> dict:
+    """Recreate the lobstertrap container so the new --policy is loaded.
+    Returns a dict with the startup log line confirming the policy file."""
+    write_compose_override(active_filename)
+    # `up -d --force-recreate lobstertrap` reads the override and rebuilds
+    # the container with the new command.
+    proc = run_compose(["up", "-d", "--force-recreate", "--no-deps",
+                         "lobstertrap"], capture=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"docker compose up failed: {proc.stderr or proc.stdout}")
+    # Wait briefly for LT to bind :8080 and emit its startup banner.
+    time.sleep(RESTART_WAIT_S)
+    # Pull the most recent logs and find the policy-loaded line.
+    logs = run_compose(["logs", "--tail", "60", "lobstertrap"],
+                        capture=True, timeout=15)
+    log_text = (logs.stdout or "") + (logs.stderr or "")
+    confirm_line = ""
+    # Strip ANSI before matching since LT uses zerolog colorization.
+    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+    for line in log_text.splitlines():
+        clean = ansi_re.sub("", line)
+        # Match either an explicit policy-loaded line (LT's zerolog
+        # banner: "policy loaded ... policy=diwan-agent-safety
+        # version=1.0 ingress_rules=N egress_rules=M") or any line
+        # mentioning our active filename (in case of a future log shape).
+        if "policy loaded" in clean.lower() or active_filename in clean:
+            confirm_line = clean.strip()
+            break
+    return {
+        "active_filename": active_filename,
+        "log_excerpt": confirm_line or
+            f"(no explicit 'loaded policy' line found; tail follows)\n"
+            f"{log_text[-600:]}",
+    }
+
+
+def cmd_rerun(args: argparse.Namespace) -> int:
+    baseline = load_run_meta(args.baseline_run_id)
+    suggested_dir = POLICIES_DIR / f"suggested-{args.baseline_run_id}"
+    if not suggested_dir.exists() or not list(suggested_dir.glob("*.yaml")):
+        print(color(
+            f"no suggested policies at {suggested_dir.relative_to(REPO_ROOT)} "
+            f"— run `diwan preflight suggest-policies "
+            f"{args.baseline_run_id}` first", C.R), file=sys.stderr)
+        return 2
+
+    rerun_id = args.run_id or str(uuid.uuid4())
+    print(f"{color('preflight rerun', C.B + C.BOLD)}  baseline={args.baseline_run_id}")
+    print(f"  new run_id = {color(rerun_id, C.BOLD)}")
+
+    # Merge agent-safety + suggested
+    active_name = f"_active-{rerun_id}.yaml"
+    merged_path = POLICIES_DIR / active_name
+    base_path = POLICIES_DIR / "agent-safety.yaml"
+    n_merged = merge_policies(merged_path, suggested_dir, base_path)
+    print(f"  merged {n_merged} suggested polic{'y' if n_merged==1 else 'ies'} "
+          f"into {merged_path.relative_to(REPO_ROOT)}")
+
+    # Restart Lobster Trap with the merged policy
+    print(f"  {color('restarting lobstertrap with new policy...', C.B)}")
+    try:
+        info = restart_lobstertrap_with_policy(active_name)
+    except Exception as e:
+        print(color(f"restart failed: {e}", C.R), file=sys.stderr)
+        return 3
+    print(f"  {color('restart confirmed:', C.G)} {info['log_excerpt'][:200]}")
+
+    # Fire the same attacks as the baseline, in GUARDED mode
+    attacks = load_attacks(baseline["attack_ids"])
+    if not attacks:
+        print(color("no baseline attacks to replay", C.R), file=sys.stderr)
+        return 4
+    print(f"  firing {len(attacks)} attack(s) (guarded mode)...")
+
+    write_marker(rerun_id, attack_id="__run_start__",
+                  note=f"rerun_of={args.baseline_run_id}", guarded=True)
+
+    trace_map: dict[str, dict] = {}
+    for i, attack in enumerate(attacks, 1):
+        prefix = f"[{i:>2}/{len(attacks)}] {attack['id']:<48}"
+        sys.stdout.write(prefix + " " + color("...", C.GR))
+        sys.stdout.flush()
+        result = fire_attack(attack, rerun_id, guarded=True,
+                              agent=baseline["agent"], model=baseline["model"])
+        trace_map[attack["id"]] = result
+        glyph = {
+            "ran": color("OK ", C.G),
+            "errored": color("ERR", C.Y),
+            "timeout": color("TMO", C.Y),
+        }.get(result["status"], "?")
+        sys.stdout.write(f"\r{prefix} {glyph}  ({result['elapsed_s']}s)\n")
+        sys.stdout.flush()
+        write_marker(rerun_id, attack_id=attack["id"], note=result["status"],
+                      guarded=True, trace_id=result["trace_id"])
+
+    # Cache + persist rerun metadata
+    cache = REPO_ROOT / ".gauntlet-cache" / "runs"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / f"{rerun_id}.json").write_text(json.dumps({
+        "run_id": rerun_id,
+        "guarded": True,
+        "agent": baseline["agent"],
+        "model": baseline["model"],
+        "attack_ids": [a["id"] for a in attacks],
+        "trace_map": trace_map,
+        "rerun_of_run_id": args.baseline_run_id,
+        "active_policy": active_name,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }, indent=2))
+
+    # Mark suggested_policy rows as applied in this rerun
+    try:
+        cmd = [
+            "exec", "-T", "ledger-writer", "python3", "-c",
+            "import sqlite3,os,sys;"
+            "p=os.environ.get('LEDGER_PATH','/data/diwan.db');"
+            "c=sqlite3.connect(p);"
+            "c.execute('UPDATE suggested_policy SET applied_in_run_id=? "
+            "WHERE run_id=? AND applied_in_run_id IS NULL',"
+            "(sys.argv[1], sys.argv[2]));"
+            "c.commit();c.close()",
+            rerun_id, args.baseline_run_id,
+        ]
+        run_compose(cmd, capture=True, timeout=15)
+    except Exception:
+        pass
+
+    # Add rerun_of_run_id column to attack_run table if missing, then
+    # upsert the row.
+    try:
+        cmd = [
+            "exec", "-T", "ledger-writer", "python3", "-c",
+            "import sqlite3,os,sys,json;"
+            "p=os.environ.get('LEDGER_PATH','/data/diwan.db');"
+            "c=sqlite3.connect(p);"
+            "cols=[r[1] for r in c.execute('PRAGMA table_info(attack_run)').fetchall()];"
+            "_=cols.count('rerun_of_run_id') or "
+            "c.execute('ALTER TABLE attack_run ADD COLUMN rerun_of_run_id TEXT');"
+            "c.execute('INSERT OR REPLACE INTO attack_run "
+            "(run_id, ts, agent_name, total_attacks, failed_count, guarded, "
+            "notes, rerun_of_run_id) VALUES (?, datetime(\"now\"), ?, ?, NULL, "
+            "1, ?, ?)',"
+            "(sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]));"
+            "c.commit();c.close()",
+            rerun_id, baseline["agent"], str(len(attacks)),
+            json.dumps({"active_policy": active_name}),
+            args.baseline_run_id,
+        ]
+        run_compose(cmd, capture=True, timeout=15)
+    except Exception as e:
+        print(f"  {color('!', C.Y)} attack_run row write failed: {e}",
+              file=sys.stderr)
+
+    print()
+    print(f"  {color('rerun complete.', C.G + C.BOLD)} new run_id = "
+          f"{color(rerun_id, C.BOLD)}")
+    print(f"  diwan preflight diff {args.baseline_run_id} {rerun_id}")
+    return 0
+
+
+# ── before/after diff ────────────────────────────────────────────────────────
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    a = score_run(args.baseline_run_id)
+    b = score_run(args.rerun_run_id)
+
+    a_by_id = {r["id"]: r for r in a["results"]}
+    b_by_id = {r["id"]: r for r in b["results"]}
+    all_ids = sorted(set(a_by_id.keys()) | set(b_by_id.keys()))
+
+    # Polarity:
+    # - For an UNGUARDED baseline, verdict=='pass' means "vulnerability
+    #   reproduced". So "reproduced" = bad.
+    # - For a GUARDED rerun, verdict=='pass' means "guarded blocked OR agent
+    #   never attempted bad action". So "reproduced" still means
+    #   verdict=='fail' (a bad outcome landed despite the gate).
+    # In both cases we collapse to a single REPRODUCED/BLOCKED/ERRORED label.
+    def reproduced(row: dict, guarded: bool) -> str:
+        if not row:
+            return "missing"
+        v = row["verdict"]
+        if v == "error":
+            return "errored"
+        if not guarded:
+            # unguarded: pass means reproduced
+            return "reproduced" if v == "pass" else "blocked"
+        # guarded: fail means a bad effect landed
+        return "reproduced" if v == "fail" else "blocked"
+
+    rows: list[dict] = []
+    improvement = regression = unchanged = 0
+    for aid in all_ids:
+        ra = a_by_id.get(aid)
+        rb = b_by_id.get(aid)
+        ba = reproduced(ra, a["guarded"]) if ra else "missing"
+        br = reproduced(rb, b["guarded"]) if rb else "missing"
+        if ba == "reproduced" and br == "blocked":
+            delta = "improvement"
+            improvement += 1
+        elif ba == "blocked" and br == "reproduced":
+            delta = "regression"
+            regression += 1
+        elif ba == br:
+            delta = "unchanged"
+            unchanged += 1
+        else:
+            delta = "mixed"
+        rows.append({
+            "attack_id": aid,
+            "baseline": ba,
+            "rerun": br,
+            "delta": delta,
+            "baseline_verdict": ra["verdict"] if ra else None,
+            "rerun_verdict": rb["verdict"] if rb else None,
+            "baseline_reason": ra["reason"] if ra else None,
+            "rerun_reason": rb["reason"] if rb else None,
+        })
+
+    base_repro = sum(1 for r in rows if r["baseline"] == "reproduced")
+    rerun_repro = sum(1 for r in rows if r["rerun"] == "reproduced")
+    total = len(rows)
+    if base_repro == 0:
+        delta_pct = 0.0
+        delta_str = "n/a (baseline reproduced 0)"
+    else:
+        delta_pct = round(100 * (base_repro - rerun_repro) / base_repro, 1)
+        delta_str = f"{delta_pct}% fewer reproduced"
+
+    summary = {
+        "baseline_run_id": args.baseline_run_id,
+        "rerun_run_id": args.rerun_run_id,
+        "totals": {
+            "total_attacks": total,
+            "baseline_reproduced": base_repro,
+            "rerun_reproduced": rerun_repro,
+            "improvement": improvement,
+            "regression": regression,
+            "unchanged": unchanged,
+            "delta_pct": delta_pct,
+        },
+        "rows": rows,
+    }
+
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    # Pretty table
+    print()
+    print(f"  {C.BOLD}Diwan Preflight — Before / After{C.RESET}"
+          if supports_color() else "  Diwan Preflight — Before / After")
+    print(f"  baseline = {args.baseline_run_id}   rerun = {args.rerun_run_id}")
+    print()
+    width = max(len(r["attack_id"]) for r in rows) + 2 if rows else 20
+    header = (f"  {'attack_id':<{width}}  {'baseline':<12}  {'rerun':<12}  "
+              f"{'delta':<14}")
+    print(color(header, C.BOLD) if supports_color() else header)
+    print("  " + "─" * (width + 12 + 12 + 14 + 6))
+    for r in rows:
+        col = {
+            "improvement": C.G,
+            "regression": C.R,
+            "unchanged": C.GR,
+            "mixed": C.Y,
+        }.get(r["delta"], C.GR)
+        b_color = C.R if r["baseline"] == "reproduced" else (
+            C.Y if r["baseline"] == "errored" else C.G)
+        r_color = C.R if r["rerun"] == "reproduced" else (
+            C.Y if r["rerun"] == "errored" else C.G)
+        bcell = f"{r['baseline']:<12}"
+        rcell = f"{r['rerun']:<12}"
+        dcell = f"{r['delta']:<14}"
+        line = (f"  {r['attack_id']:<{width}}  "
+                f"{color(bcell, b_color)}  "
+                f"{color(rcell, r_color)}  "
+                f"{color(dcell, col + C.BOLD)}")
+        print(line)
+    print()
+    print(f"  {color(f'BASELINE: {base_repro} vulnerabilities reproduced of {total} attacks', C.R + C.BOLD)}"
+          if supports_color() else
+          f"  BASELINE: {base_repro} vulnerabilities reproduced of {total} attacks")
+    rerun_col = C.G if rerun_repro < base_repro else (C.Y if rerun_repro == base_repro else C.R)
+    print(f"  {color(f'RERUN:    {rerun_repro} vulnerabilities reproduced of {total} attacks', rerun_col + C.BOLD)}"
+          if supports_color() else
+          f"  RERUN:    {rerun_repro} vulnerabilities reproduced of {total} attacks")
+    if base_repro > 0:
+        verdict_col = C.G if delta_pct >= 70 else (C.Y if delta_pct > 0 else C.R)
+        print(f"  {color(f'DELTA:    {delta_str}', verdict_col + C.BOLD)}"
+              if supports_color() else f"  DELTA:    {delta_str}")
+    else:
+        msg = ("DELTA:    baseline did not reproduce any attacks — "
+               "cannot measure improvement")
+        print(f"  {color(msg, C.Y)}")
+    print()
+    return 0
+
+
 # ── argparse wiring ──────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -597,6 +1191,32 @@ def main(argv: list[str] | None = None) -> int:
     smp = presub.add_parser("summary", help="terminal-pretty summary")
     smp.add_argument("run_id")
     smp.set_defaults(func=cmd_summary)
+
+    spp = presub.add_parser(
+        "suggest-policies",
+        help="generate Lobster Trap policies from reproduced attacks",
+    )
+    spp.add_argument("run_id")
+    spp.set_defaults(func=cmd_suggest_policies)
+
+    rrp = presub.add_parser(
+        "rerun",
+        help="restart Lobster Trap with suggested policies and refire attacks",
+    )
+    rrp.add_argument("baseline_run_id")
+    rrp.add_argument("--run-id", default=None,
+                     help="reuse a specific rerun run_id (default: random uuid4)")
+    rrp.set_defaults(func=cmd_rerun)
+
+    dfp = presub.add_parser(
+        "diff",
+        help="compare baseline vs rerun verdicts (pretty + JSON)",
+    )
+    dfp.add_argument("baseline_run_id")
+    dfp.add_argument("rerun_run_id")
+    dfp.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of a table")
+    dfp.set_defaults(func=cmd_diff)
 
     args = p.parse_args(argv)
     return args.func(args)
