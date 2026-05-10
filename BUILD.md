@@ -4,17 +4,19 @@ Source of truth for the 9-day hackathon build (May 10–18, 2026; submit May 18;
 
 **To advance the build**: open this repo in Claude Code, say "advance build" — the orchestrator pattern in [`.build/orchestrator.md`](./.build/orchestrator.md) tells any Claude session what to do.
 
+> **Build environment note (2026-05-09)**: docker is NOT installed on the agent box where most subagents run. D-1/D1 verification happens natively (npm install + `node`, Python, Go where applicable). Final container build + `docker compose up` integration test must run on a host with docker — Connor's laptop or a docker-equipped VPS. Decision: defer container builds until D2 morning when Connor's at a docker-capable machine.
+
 **Status legend**: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `[-]` cut
 
 ---
 
 ## D-1 — Sunday May 10 (foundations, no integration yet)
 
-- [ ] **T1.1** SQLite schema design → `ledger-writer/schema.sql` with tables: `prompt`, `response`, `verdict`, `intent`, `execution`, `side_effect`, `thought_summary`, `attack_run`, `suggested_policy`. Every row has `trace_id` + `ts` + `run_id` (nullable; non-null only for gauntlet rows). See [`.build/components/ledger-writer.md`](./.build/components/ledger-writer.md).
+- [x] **T1.1** SQLite schema design → `ledger-writer/schema.sql` with tables: `prompt`, `response`, `verdict`, `intent`, `execution`, `side_effect`, `thought_summary`, `attack_run`, `suggested_policy`. Every row has `trace_id` + `ts` + `run_id` (nullable; non-null only for gauntlet rows). See [`.build/components/ledger-writer.md`](./.build/components/ledger-writer.md).
 - [ ] **T1.2** `ledger-writer` Python: tail Lobster Trap audit log (JSONL), normalize each event into the schema, insert with WAL. ~150 LoC.
-- [ ] **T1.3** Verify Lobster Trap upstream clones + builds in our Dockerfile (`make build` target name). If `make build` doesn't exist, find correct Go build invocation.
-- [ ] **T1.4** Fix Zehrava Dockerfile: vendored package is `packages/gate-server` (not `packages/server`). Rewire npm install path + entry point.
-- [ ] **T1.5** `agent-harness` Node init: `package.json`, OpenAI SDK pointing at `OPENAI_BASE_URL`, four tool stubs (`web.fetch`, `db.write`, `mail.send`, `api.post`) that POST to Zehrava for each.
+- [x] **T1.3** Verify Lobster Trap upstream clones + builds in our Dockerfile (`make build` target name). If `make build` doesn't exist, find correct Go build invocation. *Real flags found: `--policy <FILE>`, `--listen <ADDR>`, `--audit-log`. No `--port`/`--policy-dir`. Audit log is JSONL with schema `timestamp/request_id/direction/action/rule_name/deny_message/metadata/prompt/declared_headers/mismatches/agent_id`. No env-var support.*
+- [x] **T1.4** Fix Zehrava Dockerfile: vendored package is `packages/gate-server` (not `packages/server`). Rewire npm install path + entry point. *Native boot verified; docker build deferred — see "Build environment" note below.*
+- [x] **T1.5** `agent-harness` Node init: `package.json`, OpenAI SDK pointing at `OPENAI_BASE_URL`, four tool stubs (`web.fetch`, `db.write`, `mail.send`, `api.post`) that POST to Zehrava for each. *Done — 5 files, ~428 LoC, npm install green, smoke test wired.*
 
 **D-1 done when**: `docker compose build` succeeds for all 5 services without errors.
 
