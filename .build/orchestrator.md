@@ -71,18 +71,33 @@ Implements 9-table schema with trace_id index. Tails Lobster Trap audit log (JSO
 parses each line, normalizes to schema, inserts with WAL.
 ```
 
-### Step 7 — Report
+### Step 7 — Report + chain
 
-Post to the user a 5-line summary:
+Post a 3-line summary:
 ```
-✓ T<X.Y> shipped: <title>
-  ↳ commit <sha7>
-  ↳ files: <count>, +<add>/-<rm>
-  ↳ next eligible: T<X.Y>
-  ↳ blockers: <count>
+✓ T<X.Y> shipped → commit <sha7> → next: T<X.Y>
 ```
 
-Then stop. Do not chain into the next task without user confirmation. Hackathon code that ships without human review is too risky.
+Then **immediately continue to the next eligible task** (chain mode is default; this is a hackathon, not a code review).
+
+**Auto-push after every successful task** — `git push origin main`. Connor wants visible progress on the public repo.
+
+### Hard stops (when to actually stop and ping Connor)
+
+Stop and post to Connor (with diagnostic detail) only when:
+- A decision gate fires (D1 Lobster×Gemini, D3 attack count, D4 suggester effectiveness, D5 visual clarity, D6 record-once)
+- A subagent returns a `[!]` blocked status
+- A task fails its acceptance test 3 times in a row
+- All eligible `[ ]` tasks are blocked
+- Connor explicitly says "stop"
+
+In all other cases: keep chaining.
+
+### Parallelism
+
+When multiple `[ ]` tasks have no shared dependencies, dispatch them as parallel subagents in a single Agent batch (multiple `Agent` tool calls in one message). Examples:
+- D-1: T1.1, T1.3, T1.4, T1.5 are all independent — fire 4 subagents in parallel
+- D2: each attack JSON file is independent — pattern-replicate in one go
 
 ## Hard rules
 
