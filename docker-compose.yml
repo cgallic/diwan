@@ -83,13 +83,15 @@ services:
       - zehrava
     restart: "no"            # demo-on-demand
 
+  # NOTE: host port 3000 is reserved on this machine (something else owns it).
+  # Map host 3030 → container 3000 to avoid collision. Visit http://localhost:3030.
   ui:
     build:
       context: ./ui
       dockerfile: Dockerfile
     image: diwan/ui:dev
     ports:
-      - "3000:3000"
+      - "3030:3000"
     volumes:
       - ledger:/data:ro
     environment:
