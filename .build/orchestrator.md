@@ -106,6 +106,7 @@ When multiple `[ ]` tasks have no shared dependencies, dispatch them as parallel
 - **Never skip a decision gate.** If today is D3 evening and the gate hasn't been checked, run the gate test before shipping more.
 - **Never mark `[x]` without verification.** "Done" requires the acceptance test to pass.
 - **Run tests in the actual docker environment**, not stubbed locally. The whole point is reproducibility.
+- **Docker access on the agent box**: connor was added to the `docker` group on 2026-05-09 but the current shell may not have docker membership cached yet. Use `sg docker -c "docker compose ..."` until next re-login. After re-login (`logout` + ssh back, or `newgrp docker`), `docker` works directly.
 
 ## When to escalate to user
 
