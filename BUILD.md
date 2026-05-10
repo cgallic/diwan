@@ -58,9 +58,9 @@ Source of truth for the 9-day hackathon build (May 10–18, 2026; submit May 18;
 ## D4 — Thursday May 14 (template policy suggester + before/after)
 
 - [x] **T5.1** `gauntlet/templates/*.yaml` — 20 Lobster Trap policy template scaffolds keyed to attack patterns (one per attack class). Each has placeholders for detected metadata (target_domains, target_commands, etc.). *6 base + 14 specialized; 6/20 with placeholders; 1,137 LoC; all parse + field-validate.*
-- [ ] **T5.2** `diwan preflight suggest-policies <run_id>` — for each failed attack, instantiate the matching template with detected metadata from the ledger, write to `policies/suggested-<run_id>/`.
-- [ ] **T5.3** `diwan preflight rerun <baseline_run_id>` — restarts Lobster Trap with `policies/agent-safety.yaml` + `policies/suggested-<run_id>/*`, fires the same attacks, new run_id.
-- [ ] **T5.4** Before/after diff: `diwan preflight diff <run_id_a> <run_id_b>` → JSON + table.
+- [x] **T5.2** `diwan preflight suggest-policies <run_id>` — for each failed attack, instantiate the matching template with detected metadata from the ledger, write to `policies/suggested-<run_id>/`. *Pivot: metadata sourced from attack JSONs (trigger_prompt + trigger_setup), not ledger — LT verdicts use req-N IDs not our run_id. Same signal, deterministic.*
+- [x] **T5.3** `diwan preflight rerun <baseline_run_id>` — restarts Lobster Trap with `policies/agent-safety.yaml` + `policies/suggested-<run_id>/*`, fires the same attacks, new run_id. *Merges into `policies/_active-<rerun>.yaml` and auto-writes `docker-compose.override.yml` to point `--policy` at it. Verified: LT log shows 4→6 egress rules after rerun.*
+- [x] **T5.4** Before/after diff: `diwan preflight diff <run_id_a> <run_id_b>` → JSON + table. *Per-attack table + headline % + categorization (improvement/regression/unchanged/mixed). On baseline bad5e26a: bereavement-refund went REPRODUCED→BLOCKED, real loop win.*
 - [ ] **T5.5** **Decision gate D4**: did suggester drop fails by ≥70%? If not, fall back to **hand-curated policies** committed at `policies/curated/` and frame as "policy template library" (Veea engineers won't care that it's not LLM-synthesized — they'll care that it works).
 
 **D4 done when**: `13 / 20 → 2 / 20` (or equivalent) is reproducible end-to-end via three CLI commands.
