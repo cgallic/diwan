@@ -1,0 +1,98 @@
+# Diwan — docker compose stack
+# 5 services + SQLite ledger. Reproducible via `docker compose up`.
+#
+# Service map:
+#   lobstertrap    — Veea's prompt/response inspection proxy (read-path)
+#   zehrava        — write-path policy + intent lifecycle (Connor's POC, vendored)
+#   ledger-writer  — tails Lobster Trap audit log, normalizes to SQLite
+#   agent-harness  — toy CRM agent for the demo (4 tools)
+#   ui    — Next.js: Preflight scoreboard, Receipts timeline, review queue
+#
+# All services share /data via a named volume; SQLite ledger lives at /data/diwan.db
+
+services:
+
+  lobstertrap:
+    build:
+      context: ./lobstertrap
+      dockerfile: Dockerfile
+    image: diwan/lobstertrap:dev
+    ports:
+      - "8080:8080"          # OpenAI-compatible proxy port (agent → here)
+    volumes:
+      - ./policies:/policies:ro
+      - ledger:/data
+    environment:
+      - LOBSTERTRAP_POLICY_DIR=/policies
+      - LOBSTERTRAP_AUDIT_LOG=/data/lobstertrap-audit.log
+      - LOBSTERTRAP_UPSTREAM=${LOBSTERTRAP_UPSTREAM:-https://api.openai.com/v1}
+    restart: unless-stopped
+
+  zehrava:
+    build:
+      context: ./zehrava
+      dockerfile: Dockerfile
+    image: diwan/zehrava:dev
+    ports:
+      - "4000:4000"          # Zehrava intent API (agent tool calls → here)
+    volumes:
+      - ./zehrava/policies:/policies:ro
+      - ledger:/data
+    environment:
+      - ZEHRAVA_POLICY_DIR=/policies
+      - ZEHRAVA_LEDGER_PATH=/data/diwan.db
+      - ZEHRAVA_FAIL_CLOSED=true
+    depends_on:
+      - lobstertrap
+    restart: unless-stopped
+
+  ledger-writer:
+    build:
+      context: ./ledger-writer
+      dockerfile: Dockerfile
+    image: diwan/ledger-writer:dev
+    volumes:
+      - ledger:/data
+    environment:
+      - LOBSTERTRAP_AUDIT_LOG=/data/lobstertrap-audit.log
+      - LEDGER_PATH=/data/diwan.db
+    depends_on:
+      - lobstertrap
+    restart: unless-stopped
+
+  agent-harness:
+    build:
+      context: ./agent-harness
+      dockerfile: Dockerfile
+    image: diwan/agent-harness:dev
+    environment:
+      - OPENAI_BASE_URL=http://lobstertrap:8080/v1
+      - ZEHRAVA_URL=http://zehrava:4000
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    depends_on:
+      - lobstertrap
+      - zehrava
+    restart: "no"            # demo-on-demand
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    image: diwan/ui:dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ledger:/data:ro
+    environment:
+      - LEDGER_PATH=/data/diwan.db
+      - ZEHRAVA_URL=http://zehrava:4000
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=gemini-3.1-pro
+    depends_on:
+      - ledger-writer
+      - zehrava
+    restart: unless-stopped
+
+volumes:
+  ledger:
+    driver: local

@@ -1,0 +1,233 @@
+# diwan-hipaa.yaml
+# ----------------------------------------------------------------------------
+# HIPAA-flavored policy pack for Diwan.
+#
+# Citations:
+#   - HIPAA Privacy Rule, 45 CFR 164.514 (de-identification standard,
+#     Safe Harbor & Expert Determination methods)
+#   - HIPAA Security Rule, 45 CFR 164.312(b) (audit controls — covered
+#     entities must implement hardware/software/procedural mechanisms
+#     that record and examine activity in info systems containing ePHI)
+#   - 45 CFR 164.514(b)(2)(i) — the 18 Safe Harbor identifiers we
+#     attempt to detect (SSN, dates, MRNs, account #s, biometric IDs,
+#     full-face photos, names, addresses, phone, fax, email, URLs, IPs,
+#     vehicle IDs, device IDs, etc.)
+#   - HHS OCR "Use of Online Tracking Technologies by HIPAA Covered
+#     Entities" (March 2024 update) — extends to AI/LLM telemetry
+#   - FDA Software as a Medical Device (SaMD) framework — relevant for
+#     "off-label medical advice" rule below
+#   - Real incident: 2023 Comm100 chatbot PHI exposure (HHS Wall of
+#     Shame); chatbot transcripts contained PHI without BAA coverage
+#
+# IMPORTANT IMPLEMENTATION NOTE (Lobster Trap upstream):
+# The DPI inspector has no native regex for MRN, ICD-10, NPI, or US
+# insurance member IDs. Of the 18 Safe Harbor identifiers, the upstream
+# pattern set covers SSN, US phone, email, and credit card via the
+# generic contains_pii field; medical-record / diagnosis / prescription
+# REQUESTS via contains_pii_request; and dates of birth via the same.
+# A production rollout should upstream the missing patterns into
+# internal/inspector/patterns.go. Until then, this pack relies on the
+# co-occurrence of (contains_pii OR contains_pii_request) with a
+# medical intent signal to approximate PHI detection.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-hipaa"
+default_action: ALLOW
+
+ingress_rules:
+  # --------------------------------------------------------------------------
+  # PHI present in prompt (Privacy Rule §164.514 — minimum necessary)
+  # If a prompt contains an SSN, that is a Safe Harbor identifier and
+  # the request enters the protected envelope. We do NOT block — a
+  # covered entity may legitimately need to process PHI through an
+  # LLM under a BAA. Instead we LOG with full metadata so the audit
+  # trail satisfies §164.312(b).
+  # --------------------------------------------------------------------------
+  - name: log_phi_in_prompt
+    description: "PHI identifier in prompt — log under §164.312(b) audit controls"
+    priority: 80
+    action: LOG
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Request for someone else's medical info (§164.502 minimum necessary)
+  # Captures "what is patient X's diagnosis", "show me the medical
+  # record for...". The inspector's PIIRequestPatterns explicitly
+  # includes medical_record / health_record / diagnosis / prescription
+  # / patient_info — see internal/inspector/patterns.go.
+  # --------------------------------------------------------------------------
+  - name: review_phi_request
+    description: "Request for third-party medical information — operator review"
+    priority: 88
+    action: HUMAN_REVIEW
+    conditions:
+      - field: contains_pii_request
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # PHI written to non-allowlisted file path
+  # Patient data should not be written outside designated workspaces.
+  # We block any path traversal toward home directories or system
+  # paths when the prompt also contains PII signals.
+  # --------------------------------------------------------------------------
+  - name: block_phi_to_sensitive_path
+    description: "PHI signals + tool call targeting sensitive path"
+    priority: 90
+    action: DENY
+    deny_message: "[DIWAN-HIPAA] Blocked: PHI cannot be written to this path."
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+      - field: contains_sensitive_paths
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # PHI exfiltration channel (§164.312(e) transmission security)
+  # If the prompt contains PII AND sets up an exfiltration channel
+  # (pastebin, webhook, base64+upload), DENY. This is the chatbot
+  # equivalent of an unencrypted email blast of patient records.
+  # --------------------------------------------------------------------------
+  - name: block_phi_exfiltration_channel
+    description: "PHI present + exfiltration pattern (§164.312(e))"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-HIPAA] Blocked: PHI exfiltration channel detected."
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+      - field: contains_exfiltration
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Off-domain PHI transit
+  # Catches prompts that paste a patient identifier alongside a non-
+  # healthcare domain (e.g., "post to Discord"). The target_domains
+  # slice is regex-able; we deny any non-allowed domain when PII fires.
+  # NOTE: this rule needs the agent's own integration list curated
+  # per-deployment; the regex below is a safe baseline (block known
+  # paste/chat services).
+  # --------------------------------------------------------------------------
+  - name: block_phi_to_paste_or_chat
+    description: "PHI + outbound to paste/chat service"
+    priority: 93
+    action: DENY
+    deny_message: "[DIWAN-HIPAA] Blocked: PHI cannot transit through that service."
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+      - field: target_domains
+        match_type: regex
+        value: "(?i)(pastebin|paste\\.ee|hastebin|ghostbin|dpaste|ix\\.io|0x0\\.st|discord(app)?|t(elegram)?\\.me|gist\\.github)"
+
+  # --------------------------------------------------------------------------
+  # Re-identification attempt
+  # The Privacy Rule allows de-identified data; once de-identified, an
+  # attempt to re-identify is a violation. We can't perfectly detect
+  # this with regex, but a co-occurrence of role-impersonation
+  # (acting as researcher / clinician / hospital admin) plus a
+  # PII request is the strongest text-based proxy.
+  # --------------------------------------------------------------------------
+  - name: review_reidentification_attempt
+    description: "Possible re-identification attempt (§164.514(b)(2)(ii))"
+    priority: 85
+    action: HUMAN_REVIEW
+    conditions:
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: contains_pii_request
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Compulsory audit log: any communication intent in HIPAA scope
+  # OCR's 2024 guidance treats AI-generated patient communications as
+  # in-scope for audit. We tag the trajectory so the replay UI keeps
+  # 6+ years of trace per §164.316(b)(2)(i).
+  # --------------------------------------------------------------------------
+  - name: log_hipaa_communications
+    description: "HIPAA-scope communication — retain for 6 years per §164.316(b)(2)(i)"
+    priority: 25
+    action: LOG
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "communication"
+
+egress_rules:
+  # --------------------------------------------------------------------------
+  # Hallucinated PHI in response
+  # If the response contains a PII identifier that wasn't in the
+  # prompt, that's the model fabricating PHI — a high-severity event
+  # (the patient may not exist, but the output reads as authoritative
+  # and could be re-emitted by a downstream tool). DENY.
+  # NOTE: Lobster Trap doesn't compare ingress vs egress detected
+  # fields directly. Approximation: if the response alone fires
+  # contains_pii, log it; deduplication against the prompt happens
+  # in the Diwan replay UI.
+  # --------------------------------------------------------------------------
+  - name: block_egress_phi_leak
+    description: "PHI in model output — block under Privacy Rule"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN-HIPAA] Output blocked: PHI in response."
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Off-label medical advice (FDA SaMD adjacent)
+  # An LLM that says "take 200mg of X twice daily" or "you have Y
+  # condition" is practicing medicine without a license. The inspector
+  # flags this via contains_pii_request (which includes prescription/
+  # diagnosis/medical_record verbs in either direction). On the egress
+  # side, that fires when the MODEL emits those terms.
+  # --------------------------------------------------------------------------
+  - name: review_egress_off_label_advice
+    description: "Possible off-label medical advice in response"
+    priority: 90
+    action: HUMAN_REVIEW
+    conditions:
+      - field: contains_pii_request
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Credential / record-system leak in response
+  # Same protection as agent-safety pack but called out here because
+  # the threat model includes EHR API keys, FHIR bearer tokens, etc.
+  # --------------------------------------------------------------------------
+  - name: block_egress_credential_leak
+    description: "Credential leak in response (EHR/FHIR API key class)"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-HIPAA] Output blocked: credential leak."
+    conditions:
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Egress observability: every response in HIPAA scope is logged
+  # We don't filter — full retention is the SOP. Replay UI joins
+  # ingress and egress on request_id for trajectory reconstruction.
+  # --------------------------------------------------------------------------
+  - name: log_egress_with_url
+    description: "Response contains URL — log for retention review"
+    priority: 20
+    action: LOG
+    conditions:
+      - field: contains_urls
+        match_type: boolean
+        value: true

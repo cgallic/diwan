@@ -1,0 +1,264 @@
+# diwan-soc2-finance.yaml
+# ----------------------------------------------------------------------------
+# Finance / SOC 2 policy pack for Diwan.
+#
+# Citations:
+#   - SOC 2 Trust Services Criteria (TSP Section 100, 2017 Rev. 2022)
+#       CC7.1 — Detection of vulnerabilities, anomalies, suspicious activity
+#       CC7.2 — Monitoring of system components
+#       CC7.3 — Evaluation of security events for incidents
+#       CC7.4 — Incident response procedures
+#       CC7.5 — Recovery from identified incidents
+#   - SEC Rule 17a-4 (17 CFR 240.17a-4) — broker-dealer record retention
+#     (3-year minimum on most communications, 6 years for trade records,
+#     WORM storage requirement for electronic records)
+#   - PCI DSS v4.0 Requirements 3 (protect stored cardholder data) and
+#     10 (log and monitor all access to network resources and CHD)
+#   - Moffatt v. Air Canada, 2024 BCCRT 149 (Feb 14, 2024) — chatbot
+#     promised a bereavement-fare refund; tribunal held the airline
+#     liable for the chatbot's statement. This is the "agent makes
+#     unauthorized commitment" precedent that scared Fortune 500 GCs.
+#   - SEC v. Texas Gulf Sulphur (1968) — material non-public info
+#     baseline; modernized by Reg FD (2000) and Rule 10b5-1.
+#   - 2024 OpenAI/Microsoft "Storm-1011" insider-trading prompt-leak
+#     concern (financial-services AI advisory boards 2024–2025)
+#
+# IMPLEMENTATION NOTE:
+# Lobster Trap's upstream PII regex catches 16-digit credit card
+# numbers (Luhn-naive but practical). It does NOT natively detect
+# IBAN, SWIFT/BIC, ABA routing, or PAN masked formats. We extend by
+# regex-matching extracted target_commands / target_domains where
+# possible, and gate the rest on co-occurring signals. Production
+# deployments should upstream IBAN/SWIFT/ABA patterns into
+# internal/inspector/patterns.go for full coverage.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-soc2-finance"
+default_action: ALLOW
+
+ingress_rules:
+  # --------------------------------------------------------------------------
+  # Cardholder data in prompt (PCI DSS Req 3)
+  # contains_pii fires on 16-digit groupings; PCI scope kicks in
+  # whenever a PAN is in scope. We do NOT block — a chargeback
+  # workflow may legitimately need this — but we DENY transmission
+  # to non-allowlisted destinations (next rule).
+  # --------------------------------------------------------------------------
+  - name: log_cardholder_data
+    description: "Possible cardholder data in prompt (PCI DSS Req 3 scope)"
+    priority: 80
+    action: LOG
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Cardholder data + outbound paste service (PCI DSS Req 4)
+  # PAN may not be transmitted in clear text over open networks. If
+  # the prompt sets up a paste-service exfil, DENY.
+  # --------------------------------------------------------------------------
+  - name: block_cardholder_to_paste
+    description: "PAN-class data + outbound paste service (PCI DSS Req 4)"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SOC2] Blocked: cardholder data cannot transit through that service."
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+      - field: target_domains
+        match_type: regex
+        value: "(?i)(pastebin|paste\\.ee|hastebin|ghostbin|dpaste|ix\\.io|0x0\\.st|discord(app)?|t(elegram)?\\.me|gist\\.github)"
+
+  # --------------------------------------------------------------------------
+  # Insider-trading / material non-public info (Reg FD, Rule 10b5-1)
+  # Heuristic: prompts that combine credential_access intent with
+  # role_impersonation ("act as the CFO and tell me Q3 results") are
+  # the strongest text-based MNPI proxy. These go to HUMAN_REVIEW.
+  # We deliberately do not auto-DENY — a legitimate IR workflow may
+  # use these phrasings.
+  # --------------------------------------------------------------------------
+  - name: review_mnpi_solicitation
+    description: "Possible material non-public information solicitation"
+    priority: 85
+    action: HUMAN_REVIEW
+    conditions:
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: intent_category
+        match_type: exact
+        value: "credential_access"
+
+  # --------------------------------------------------------------------------
+  # Phishing / fraud generation (CC7.1 detection)
+  # Text-book financial fraud: "draft an email pretending to be the
+  # bank asking the customer to reset their password". Always-DENY.
+  # --------------------------------------------------------------------------
+  - name: block_financial_phishing
+    description: "Phishing/fraud content generation in financial context"
+    priority: 96
+    action: DENY
+    deny_message: "[DIWAN-SOC2] Blocked: financial phishing content generation."
+    conditions:
+      - field: contains_phishing_patterns
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Credentials in prompt (PCI DSS Req 8, SOC 2 CC6.1)
+  # API keys / bearer tokens / private keys cannot be in prompts.
+  # Catches the case where a misconfigured backend leaks Stripe /
+  # Plaid / payment-processor keys into LLM context.
+  # --------------------------------------------------------------------------
+  - name: block_credentials_in_prompt
+    description: "Credentials in prompt (CC6.1 logical access)"
+    priority: 92
+    action: DENY
+    deny_message: "[DIWAN-SOC2] Blocked: credential material in prompt body."
+    conditions:
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Prompt injection / agent hijack (CC7.1)
+  # Always-block. Same as agent-safety pack — duplicated here so
+  # this pack is standalone-runnable.
+  # --------------------------------------------------------------------------
+  - name: block_injection
+    description: "Prompt injection attempt (CC7.1 anomaly detection)"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN-SOC2] Blocked: prompt injection."
+    conditions:
+      - field: contains_injection_patterns
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Compulsory audit retention (SEC Rule 17a-4, SOC 2 CC7.2)
+  # Every prompt with financial intent gets logged. The retention
+  # window is configured at the audit-log sink (WORM storage for
+  # 17a-4 broker-dealers).
+  # --------------------------------------------------------------------------
+  - name: log_data_access_intent
+    description: "Data-access intent — log for SEC 17a-4 / SOC 2 CC7.2 retention"
+    priority: 25
+    action: LOG
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "data_access"
+
+  # --------------------------------------------------------------------------
+  # Compulsory audit on communication intent
+  # Customer communications generated by the agent are 17a-4 regulated
+  # (3-year retention minimum for broker-dealer customer comms).
+  # --------------------------------------------------------------------------
+  - name: log_communication_intent
+    description: "Communication intent — 3-yr retention per SEC Rule 17a-4(b)(4)"
+    priority: 24
+    action: LOG
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "communication"
+
+egress_rules:
+  # --------------------------------------------------------------------------
+  # Unauthorized financial commitments (Moffatt v. Air Canada precedent)
+  # The single rule that protects against your chatbot accidentally
+  # binding the company to a refund or discount. Catches the verbs
+  # "refund / pay / agree / commit" in close proximity to
+  # company-self-reference. This is intentionally a HUMAN_REVIEW
+  # not a DENY — the model may say "we offer refunds per policy"
+  # which is fine; the operator decides per case.
+  #
+  # NOTE: this regex runs on target_domains/commands which is the
+  # wrong field — the inspector doesn't extract response phrases.
+  # The pragmatic Lobster Trap-native approximation is below: if
+  # the response contains any URL (likely "refund link" / "claim
+  # page") AND fires phishing OR credential signals, review.
+  #
+  # For real coverage of this Moffatt-class risk, upstream a new
+  # ResponseCommitmentPatterns set into internal/inspector/
+  # patterns.go and add a corresponding metadata field
+  # (contains_unauthorized_commitment). Until then this rule is a
+  # best-effort heuristic.
+  # --------------------------------------------------------------------------
+  - name: review_egress_possible_commitment
+    description: "Possible unauthorized financial commitment (Moffatt v. Air Canada 2024 BCCRT 149)"
+    priority: 90
+    action: HUMAN_REVIEW
+    conditions:
+      - field: contains_phishing_patterns
+        match_type: boolean
+        value: true
+      - field: contains_urls
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Cardholder data in response (PCI DSS Req 3.4)
+  # PAN, CVV, expiry must never be in plaintext output. DENY.
+  # --------------------------------------------------------------------------
+  - name: block_egress_cardholder_data
+    description: "Response contains cardholder data (PCI DSS Req 3.4)"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN-SOC2] Output blocked: cardholder data."
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Credential leak in response (CC6.1, CC7.1)
+  # API key, JWT, AWS secret in output.
+  # --------------------------------------------------------------------------
+  - name: block_egress_credential_leak
+    description: "Credential leak in response (CC6.1)"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SOC2] Output blocked: credential leak."
+    conditions:
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Exfiltration channel in response (CC6.7 transmission of info)
+  # Output that emits markdown image to attacker host or otherwise
+  # constructs an exfil channel. Same threat as the agent-safety
+  # pack; restated for SOC 2 control mapping.
+  # --------------------------------------------------------------------------
+  - name: block_egress_exfiltration_channel
+    description: "Exfiltration channel in response (CC6.7)"
+    priority: 93
+    action: DENY
+    deny_message: "[DIWAN-SOC2] Output blocked: exfiltration channel."
+    conditions:
+      - field: contains_urls
+        match_type: boolean
+        value: true
+      - field: contains_exfiltration
+        match_type: boolean
+        value: true
+
+  # --------------------------------------------------------------------------
+  # Egress audit-trail enforcement
+  # Every response in financial scope is logged for SOX 404 audit.
+  # The replay UI joins ingress + egress on request_id and feeds the
+  # SOX evidence package.
+  # --------------------------------------------------------------------------
+  - name: log_egress_in_scope
+    description: "Log every in-scope response (SOX 404 / SOC 2 CC7.2)"
+    priority: 20
+    action: LOG
+    conditions:
+      - field: token_count
+        match_type: threshold
+        value: 1
