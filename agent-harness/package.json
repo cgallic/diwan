@@ -1,0 +1,21 @@
+{
+  "name": "@diwan/agent-harness",
+  "version": "0.1.0",
+  "description": "Toy CRM-support agent. 4 tools (web.fetch, db.write, mail.send, api.post), each gated by Zehrava.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "agent-harness": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "openai": "^4.65.0",
+    "better-sqlite3": "^11.3.0"
+  },
+  "license": "MIT"
+}
