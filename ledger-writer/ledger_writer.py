@@ -25,21 +25,36 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format=LOG_FORMAT
 log = logging.getLogger("ledger_writer")
 
 SCHEMA_FILE = Path(__file__).resolve().parent / "schema.sql"
+VIEWS_FILE = Path(__file__).resolve().parent / "views.sql"
 POLL_INTERVAL = 0.5
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Apply schema.sql once. Idempotent: skip if 'verdict' table already exists."""
+    """Apply schema.sql + views.sql at startup.
+
+    Tables (schema.sql): probe-gated — skipped if 'verdict' already exists, so
+    we don't attempt CREATE TABLE on existing data.
+    Views (views.sql): always re-applied. The file uses DROP VIEW IF EXISTS +
+    CREATE VIEW so each startup picks up the latest view definitions without
+    affecting the underlying tables. Cheap and safe.
+    """
     cur = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='verdict'"
     )
     if cur.fetchone():
-        log.info("schema already present; skipping init")
-        return
-    if not SCHEMA_FILE.exists():
-        raise RuntimeError(f"schema file not found: {SCHEMA_FILE}")
-    log.info("initializing schema from %s", SCHEMA_FILE)
-    conn.executescript(SCHEMA_FILE.read_text())
+        log.info("schema already present; skipping table init")
+    else:
+        if not SCHEMA_FILE.exists():
+            raise RuntimeError(f"schema file not found: {SCHEMA_FILE}")
+        log.info("initializing schema from %s", SCHEMA_FILE)
+        conn.executescript(SCHEMA_FILE.read_text())
+        conn.commit()
+
+    # Views are always re-applied (idempotent via DROP VIEW IF EXISTS in file).
+    if not VIEWS_FILE.exists():
+        raise RuntimeError(f"views file not found: {VIEWS_FILE}")
+    log.info("applying views from %s", VIEWS_FILE)
+    conn.executescript(VIEWS_FILE.read_text())
     conn.commit()
 
 
