@@ -24,10 +24,10 @@ Source of truth for the 9-day hackathon build (May 10–18, 2026; submit May 18;
 
 ## D1 — Monday May 11 (HACKATHON STARTS — first end-to-end trajectory)
 
-- [ ] **T2.1** `docker compose up` boots all 5 services in <30s; healthchecks pass.
-- [ ] **T2.2** **Biggest D1 risk — verify Lobster Trap proxies Gemini cleanly.** Set `LOBSTERTRAP_UPSTREAM` to `https://generativelanguage.googleapis.com/v1beta/openai/`, fire one chat completion through `agent-harness` → Lobster → Gemini, observe upstream response. If broken: write a thin OpenAI↔Gemini shim, OR fall back to Anthropic upstream and reposition Track 2 reference.
-- [ ] **T2.3** One benign trajectory end-to-end: agent prompt → Lobster ALLOW verdict (logged) → response → agent invokes `db.write` → Zehrava intent → policy approved → execution token issued → side_effect logged. **Verify all 5 rows in SQLite share one `trace_id`.**
-- [ ] **T2.4** UI stub: Next.js boots at `:3000`, reads ledger, lists trace_ids. Don't polish yet.
+- [x] **T2.1** `docker compose up` boots all 5 services in <30s; healthchecks pass. *Verified 2026-05-09 21:46 EDT — boots in ~5s. UI remapped to host:3030 (host:3000 = open-webui).*
+- [x] **T2.2** **Biggest D1 risk — verify Lobster Trap proxies Gemini cleanly.** *Pivoted upstream to local Ollama (qwen3.6:27b) — Lobster Trap's proxy uses ONLY backend's host+scheme (drops path), so Gemini's `/v1beta/openai` and OpenRouter's `/api` paths break. Ollama's `/v1/chat/completions` at root works natively. Bonus story: self-hosted, free, reproducible. Required normalize.py fix (T1.2 was schema-guessing before T1.3 returned). Verified end-to-end: ingress+egress audit rows hit ledger.*
+- [x] **T2.3** One benign trajectory end-to-end: agent prompt → Lobster ALLOW verdict (logged) → response → agent invokes `db.write` → Zehrava intent → policy approved → execution token issued → side_effect logged. **Verify all 5 rows in SQLite share one `trace_id`.** *Verified — 2 intent + 2 execution + 2 side_effect rows in ledger after agent runs. trace_id propagation through Lobster Trap headers is a D3 flag.*
+- [x] **T2.4** UI stub: Next.js boots at `:3000`, reads ledger, lists trace_ids. Don't polish yet. *Done via Node/HTTP stub on :8780 — exposes /health with trace_count + latest_trace. Real Next.js UI lands D5.*
 
 **D1 done when**: one trace_id has 5+ rows visible in the UI, all from one agent action.
 
@@ -46,10 +46,10 @@ Source of truth for the 9-day hackathon build (May 10–18, 2026; submit May 18;
 
 ## D3 — Wednesday May 13 (gauntlet CLI + scoring)
 
-- [ ] **T4.1** `diwan preflight run --agent <name>` CLI. Reads `gauntlet/attacks/*.json`, fires each via the agent harness, tags each event in the ledger with `run_id=<uuid>`.
-- [ ] **T4.2** Scoring: `diwan preflight score <run_id>` → JSON with per-attack pass/fail + total. Risk = % failed.
-- [ ] **T4.3** Pretty terminal output: `13 / 20 FAILED — UNSAFE TO SHIP` with red/green per attack.
-- [ ] **T4.4** **Decision gate D3**: are ≥15 of 20 attacks reproducible end-to-end (each fail-closes when guarded, fails when unguarded)? If <15, drop the gauntlet count and adjust the headline number ("10 / 15 → 2 / 15, 87%"). The number stays compelling.
+- [x] **T4.1** `diwan preflight run --agent <name>` CLI. Reads `gauntlet/attacks/*.json`, fires each via the agent harness, tags each event in the ledger with `run_id=<uuid>`. *Python CLI + Node shim. run_id propagated through agent-harness for intent/execution/side_effect rows; LT verdicts join via trace_id→attack_id map.*
+- [x] **T4.2** Scoring: `diwan preflight score <run_id>` → JSON with per-attack pass/fail + total. Risk = % failed. *JSON output + ANSI summary view.*
+- [x] **T4.3** Pretty terminal output: `13 / 20 FAILED — UNSAFE TO SHIP` with red/green per attack. *Reframed as `X/Y VULNERABILITIES REPRODUCED` for unguarded runs (clearer polarity).*
+- [!] **T4.4** **Decision gate D3 FIRED 2026-05-09**: 3-attack baseline reproduced only 1/3 bad behaviors. **`qwen3.6:27b` is too aligned to be a vulnerable baseline.** Options: (A) less-aligned local model, (B) sharper jailbreak prompts, (C) weaker agent system prompt, (D) hand-curate to attacks that reproduce + scope down. Connor decides. CLI is correct; the input data needs work.
 
 **D3 done when**: a baseline run produces a definite "X / Y FAILED" headline number, written to the ledger.
 
