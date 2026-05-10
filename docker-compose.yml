@@ -22,8 +22,12 @@ services:
     volumes:
       - ./policies:/policies:ro
       - ledger:/data
-    # Lobster Trap takes config via CLI flags only — no env vars supported.
-    # Override the binary's CMD with our values; --policy is a single FILE.
+    # Reach the host's Ollama (or any localhost service) via host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Lobster Trap config is CLI-flag only (no env-var support). Note: the proxy
+    # uses ONLY the backend's scheme+host (path is dropped) — pick a backend
+    # that natively serves /v1/chat/completions at its root (Ollama, OpenAI).
     command:
       - "serve"
       - "--policy"
@@ -31,7 +35,7 @@ services:
       - "--listen"
       - ":8080"
       - "--backend"
-      - "${LOBSTERTRAP_UPSTREAM:-https://generativelanguage.googleapis.com/v1beta/openai/}"
+      - "${LOBSTERTRAP_UPSTREAM:-http://host.docker.internal:11434}"
       - "--audit-log"
       - "/data/lobstertrap-audit.log"
       - "--no-dashboard"

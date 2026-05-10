@@ -120,25 +120,35 @@ def normalize(event: dict) -> list[tuple[str, dict]]:
             },
         ))
 
-    # verdict — every event has one in normal flow, but be tolerant if absent
-    verdict = event.get("verdict")
-    if isinstance(verdict, dict):
-        action = _first(verdict, "action", "decision")
-        if action:  # action is NOT NULL in schema; skip if missing
-            rows.append((
-                "verdict",
-                {
-                    "trace_id": trace_id,
-                    "ts": ts,
-                    "run_id": run_id,
-                    "rule_name": _first(verdict, "rule_name", "rule"),
-                    "action": str(action),
-                    "side": _first(event, "side", default=_first(verdict, "side", default="ingress")),
-                    "details": _stringify(_first(verdict, "details", "reason", default=None)) or None,
-                },
-            ))
-        else:
-            log.warning("verdict block missing 'action' for trace %s", trace_id)
+    # verdict — Lobster Trap real schema has action/rule_name at top-level
+    # (not nested under "verdict"). Also the 'side' field is called 'direction'.
+    # Confirmed via T1.3 source-level read of veeainc/lobstertrap audit format.
+    action = _first(event, "action") or _first(_get(event, "verdict") or {}, "action", "decision")
+    if action:
+        side = _first(event, "direction", "side", default="ingress")
+        # Normalize ingress/egress vs old side= naming
+        if side in ("inbound", "in"):
+            side = "ingress"
+        elif side in ("outbound", "out"):
+            side = "egress"
+        rule_name = _first(event, "rule_name", "rule") or _first(_get(event, "verdict") or {}, "rule_name", "rule")
+        details_src = _first(event, "deny_message", "details", "reason") or _first(_get(event, "verdict") or {}, "details", "reason")
+        rows.append((
+            "verdict",
+            {
+                "trace_id": trace_id,
+                "ts": ts,
+                "run_id": run_id,
+                "rule_name": rule_name,
+                "action": str(action),
+                "side": side,
+                "details": _stringify(details_src) if details_src else None,
+            },
+        ))
+
+    # Lobster Trap audit log doesn't carry prompt/response bodies — those rows
+    # are written by agent-harness directly (it has the actual content). We
+    # only derive verdict rows from Lobster's audit log.
 
     if not rows:
         log.warning("event produced 0 rows; keys=%s", list(event.keys())[:10])
