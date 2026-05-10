@@ -32,6 +32,12 @@ venv/
 *.db-wal
 data/
 
+# Gauntlet runtime artifacts (regenerated per run)
+.gauntlet-cache/
+policies/_active-*.yaml
+policies/suggested-*/
+docker-compose.override.yml
+
 # Demo recordings
 *.mov
 *.mp4
