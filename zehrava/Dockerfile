@@ -4,8 +4,9 @@ WORKDIR /app
 COPY packages/ ./packages/
 COPY policies/ ./policies/
 COPY schemas/ ./schemas/
-RUN cd packages/server && npm ci --omit=dev || npm install --omit=dev
+RUN cd packages/gate-server && (npm ci --omit=dev --legacy-peer-deps || npm install --omit=dev --legacy-peer-deps)
 EXPOSE 4000
+ENV PORT=4000
 ENV ZEHRAVA_POLICY_DIR=/policies
 ENV ZEHRAVA_LEDGER_PATH=/data/diwan.db
-CMD ["node", "packages/server/index.js"]
+CMD ["node", "packages/gate-server/src/index.js"]
