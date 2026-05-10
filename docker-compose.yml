@@ -22,10 +22,19 @@ services:
     volumes:
       - ./policies:/policies:ro
       - ledger:/data
-    environment:
-      - LOBSTERTRAP_POLICY_DIR=/policies
-      - LOBSTERTRAP_AUDIT_LOG=/data/lobstertrap-audit.log
-      - LOBSTERTRAP_UPSTREAM=${LOBSTERTRAP_UPSTREAM:-https://api.openai.com/v1}
+    # Lobster Trap takes config via CLI flags only — no env vars supported.
+    # Override the binary's CMD with our values; --policy is a single FILE.
+    command:
+      - "serve"
+      - "--policy"
+      - "/policies/agent-safety.yaml"
+      - "--listen"
+      - ":8080"
+      - "--backend"
+      - "${LOBSTERTRAP_UPSTREAM:-https://generativelanguage.googleapis.com/v1beta/openai/}"
+      - "--audit-log"
+      - "/data/lobstertrap-audit.log"
+      - "--no-dashboard"
     restart: unless-stopped
 
   zehrava:
