@@ -1,0 +1,14 @@
+{
+  "name": "diwan-ui",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Stub. Real Next.js + tRPC + better-sqlite3 implementation lands D5 (T6.x).",
+  "type": "module",
+  "scripts": {
+    "build": "echo 'ui stub: nothing to build yet'",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0"
+  }
+}
