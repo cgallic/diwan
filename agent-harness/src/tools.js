@@ -14,6 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { submitIntent, reportOutcome } from './intent.js';
+import { recordSideEffect, recordExecution } from './ledger.js';
 
 const SIDE_EFFECT_LOG = process.env.DIWAN_SIDE_EFFECT_LOG || '/data/side-effects.jsonl';
 const CRM_DB_PATH = process.env.DIWAN_CRM_DB || '/data/crm.db';
@@ -129,6 +130,7 @@ export async function callTool(toolName, args, traceId) {
   try { result = await impl(args || {}); }
   catch (e) { error = e.message; }
 
+  const outcome = error ? 'failed' : 'succeeded';
   const record = {
     ts: new Date().toISOString(),
     tool: toolName,
@@ -136,9 +138,27 @@ export async function callTool(toolName, args, traceId) {
     result: result || null,
     error: error || null,
     intent_id: verdict.intentId,
+    execution_token: verdict.executionToken,
     trace_id: traceId,
   };
   await appendSideEffect(record);
+
+  // Mirror into /data/diwan.db: flip execution → succeeded/failed and record
+  // the side_effect row keyed to the same execution_token + trace_id.
+  recordExecution({
+    executionToken: verdict.executionToken,
+    intentId: verdict.intentId,
+    traceId,
+    status: outcome,
+  });
+  recordSideEffect({
+    traceId,
+    executionToken: verdict.executionToken,
+    kind: toolName,
+    outcome,
+    details: { tool: toolName, args, result: result || null, error: error || null, intent_id: verdict.intentId },
+  });
+
   await reportOutcome(verdict.intentId, { succeeded: !error, result, error });
 
   return error

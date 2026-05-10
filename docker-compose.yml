@@ -78,10 +78,13 @@ services:
       context: ./agent-harness
       dockerfile: Dockerfile
     image: diwan/agent-harness:dev
+    volumes:
+      - ledger:/data           # for /data/diwan.db, /data/crm.db, /data/side-effects.jsonl
     environment:
       - OPENAI_BASE_URL=http://lobstertrap:8080/v1
       - ZEHRAVA_URL=http://zehrava:4000
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - LEDGER_PATH=/data/diwan.db
     depends_on:
       - lobstertrap
       - zehrava
