@@ -18,7 +18,7 @@ services:
       dockerfile: Dockerfile
     image: diwan/lobstertrap:dev
     ports:
-      - "8080:8080"          # OpenAI-compatible proxy port (agent → here)
+      - "8781:8080"          # host:8781 → container:8080 (OpenAI-compat proxy)
     volumes:
       - ./policies:/policies:ro
       - ledger:/data
@@ -43,7 +43,7 @@ services:
       dockerfile: Dockerfile
     image: diwan/zehrava:dev
     ports:
-      - "4000:4000"          # Zehrava intent API (agent tool calls → here)
+      - "8782:4000"          # host:8782 → container:4000 (Zehrava intent API)
     volumes:
       - ./zehrava/policies:/policies:ro
       - ledger:/data
@@ -83,15 +83,15 @@ services:
       - zehrava
     restart: "no"            # demo-on-demand
 
-  # NOTE: host port 3000 is reserved on this machine (something else owns it).
-  # Map host 3030 → container 3000 to avoid collision. Visit http://localhost:3030.
+  # Diwan host ports live in the 87xx range (agent-box convention — casa, wiki,
+  # kaicalls all live there). Avoids collisions with system services on 3000/4000/8080.
   ui:
     build:
       context: ./ui
       dockerfile: Dockerfile
     image: diwan/ui:dev
     ports:
-      - "3030:3000"
+      - "8780:3000"          # host:8780 → container:3000 (UI)
     volumes:
       - ledger:/data:ro
     environment:
