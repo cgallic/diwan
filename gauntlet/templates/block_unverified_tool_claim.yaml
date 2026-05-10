@@ -1,0 +1,60 @@
+# diwan-template-block_unverified_tool_claim.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Egress LOG on any communication-intent response that mentions
+#     rollback / restored / recovered / retried tool outcomes — Zehrava
+#     joins this signal with its write-path log on `trace_id` and emits
+#     a contradiction artifact if no matching tool execution exists.
+#   - Egress HUMAN_REVIEW when communication intent fires alongside
+#     role_impersonation and an inspector signal that the response is
+#     reporting actions (system intent or system_commands signal). This
+#     is the "agent self-reports a tool result that has zero execution
+#     artifact in the ledger" shape.
+#
+# IMPORTANT: HUMAN_REVIEW is observability-only at the Lobster Trap proxy.
+# The actual cross-artifact check (response claims rollback X, ledger has
+# no rollback execution within the lookback window) lives in Zehrava — it
+# joins the proxy verdict with its own write-path log on trace_id.
+#
+# Covers attacks: tool-spoof-fake-rollback.
+#
+# OWASP: LLM06.
+#
+# Placeholders: NONE.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_unverified_tool_claim"
+default_action: ALLOW
+
+egress_rules:
+  - name: review_self_reported_tool_outcome_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Communication output reporting a system action — Zehrava cross-checks ledger"
+    priority: 78
+    # HUMAN_REVIEW = observability-only at proxy; Zehrava cross-checks
+    # the trace's write-path log for the matching execution artifact.
+    action: HUMAN_REVIEW
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "communication"
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: contains_system_commands
+        match_type: boolean
+        value: true
+
+  - name: log_communication_with_system_intent_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Audit-log communication outputs that reference system actions"
+    priority: 31
+    action: LOG
+    conditions:
+      - field: contains_system_commands
+        match_type: boolean
+        value: true
+      - field: intent_category
+        match_type: exact
+        value: "communication"

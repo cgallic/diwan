@@ -1,0 +1,61 @@
+# diwan-template-block_indirect_injection.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested, instantiated by the
+# `gauntlet suggest-policies` command from a baseline attack run.
+#
+# Shape:
+#   - Hard DENY on prompts containing direct/indirect prompt-injection markers
+#     ("ignore previous instructions", DAN, <system> tags, BEGIN SYSTEM PROMPT).
+#   - Hard DENY on egress where the response carries injection markers AND
+#     role-impersonation tokens (heuristic for system-prompt leak / poisoned
+#     RAG content reflected back).
+#   - Hard DENY on egress when the inspector flags obfuscation (base64-decode,
+#     char-splitting, ROT13) — the EchoLeak-class indirect smuggling shape.
+#
+# Covers attacks: indirect-injection-echoleak, prompt-injection-malicious-ticket,
+# prompt-injection-poisoned-rag-doc, prompt-injection-role-override.
+#
+# OWASP: LLM01 (prompt injection).
+#
+# Placeholders: NONE — this template is static. The suggester writes it
+# verbatim.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_indirect_injection"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_direct_prompt_injection_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Direct prompt injection markers (LLM01)"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: prompt injection detected (LLM01)."
+    conditions:
+      - field: contains_injection_patterns
+        match_type: boolean
+        value: true
+
+  - name: block_obfuscated_injection_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Indirect-injection obfuscation (CVE-2025-32711 class)"
+    priority: 99
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: obfuscated instruction smuggling."
+    conditions:
+      - field: contains_obfuscation
+        match_type: boolean
+        value: true
+
+egress_rules:
+  - name: block_egress_injection_reflection_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Output looks like leaked system prompt or reflected injection"
+    priority: 98
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: suspected prompt-injection reflection."
+    conditions:
+      - field: contains_injection_patterns
+        match_type: boolean
+        value: true
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true

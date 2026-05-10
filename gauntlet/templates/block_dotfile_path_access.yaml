@@ -1,0 +1,52 @@
+# diwan-template-block_dotfile_path_access.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Ingress DENY when extracted file paths target dotfile credential
+#     stores (.ssh, .aws, .env, .gnupg, .docker/config, .kube/config) OR
+#     well-known sensitive system paths (/etc/passwd, /etc/shadow, /root/).
+#   - Catches the "agent reads ~/.aws/credentials to call AWS API" surface.
+#
+# Covers attacks: indirect-injection-echoleak (env-dump via path read),
+# exfil-env-vars-via-webhook (env file path).
+#
+# OWASP: LLM02 + LLM06.
+#
+# Placeholders: NONE — uses fixed regex against `target_paths` slice.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_dotfile_path_access"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_dotfile_credential_paths_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Tool args target dotfile credential stores (.ssh, .aws, .env, .gnupg, .kube)"
+    priority: 89
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: dotfile credential path."
+    conditions:
+      - field: target_paths
+        match_type: regex
+        value: "(?i)(\\.ssh/|\\.aws/|\\.env(\\.|$)|\\.gnupg/|\\.docker/config|\\.kube/config)"
+
+  - name: block_sensitive_system_paths_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Tool args target /etc/{passwd,shadow}, /root/, *.pem, *.key"
+    priority: 88
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: sensitive system path."
+    conditions:
+      - field: target_paths
+        match_type: regex
+        value: "(?i)(^/etc/(passwd|shadow|sudoers)|^/root/|\\.pem$|\\.key$|/proc/self/environ)"
+
+  - name: block_sensitive_path_signal_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Inspector flagged sensitive path access (LLM06)"
+    priority: 87
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: sensitive path access denied."
+    conditions:
+      - field: contains_sensitive_paths
+        match_type: boolean
+        value: true

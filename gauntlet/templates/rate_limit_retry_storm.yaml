@@ -1,0 +1,53 @@
+# diwan-template-rate_limit_retry_storm.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - LOG every outbound api_post / web_fetch ingress event whose extracted
+#     domain matches a target endpoint, paired with a RATE_LIMIT verdict
+#     when the same domain is observed many times in close succession.
+#
+# IMPORTANT: per the Lobster Trap source-level reference, the action
+# `RATE_LIMIT` exists in the action enum but the proxy has no codepath that
+# enforces it (parsed-only). The `rate_limits` policy block is also dead
+# config. We emit RATE_LIMIT as a verdict here so:
+#   (a) the audit log carries the signal for Zehrava to enforce downstream
+#       (Zehrava Gate counts trace-level frequency and applies the cap), and
+#   (b) the agent wrapper can honor `_lobstertrap.verdict=RATE_LIMIT` and
+#       defer/escalate.
+#
+# Covers attacks: tool-misuse-retry-storm.
+#
+# OWASP: LLM10 (unbounded consumption).
+#
+# Placeholders:
+#   {{detected_metadata.target_domain}}
+#       The endpoint the failing attack hammered (extracted from the
+#       attack's audit log target_domains slice).
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-rate_limit_retry_storm"
+default_action: ALLOW
+
+ingress_rules:
+  - name: rate_limit_target_endpoint_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Rate-limit storming agent on observed failing endpoint (Zehrava enforces window)"
+    priority: 80
+    # RATE_LIMIT = parsed by Lobster Trap but not enforced at the proxy;
+    # Zehrava Gate honors the verdict downstream and applies the per-trace
+    # frequency cap.
+    action: RATE_LIMIT
+    conditions:
+      - field: target_domains
+        match_type: regex
+        value: "(?i){{detected_metadata.target_domain}}"
+
+  - name: log_outbound_call_observability_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Audit-log every outbound network intent for retry-storm detection"
+    priority: 30
+    action: LOG
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "network"

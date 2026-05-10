@@ -1,0 +1,58 @@
+# diwan-template-block_privilege_escalation.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Ingress DENY on prompts whose command extractor catches a role-grant
+#     write into user_roles / roles / permissions tables for privileged
+#     roles (admin, superadmin, owner, root).
+#   - Ingress DENY on outbound calls to admin-grant API paths (the
+#     `api_post('/admin/grant', ...)` shape from the malicious-ticket
+#     attack).
+#   - Egress LOG on role_impersonation co-occurring with a write intent —
+#     Zehrava surfaces for review.
+#
+# Covers attacks: unauth-privilege-escalation, prompt-injection-malicious-ticket.
+#
+# OWASP: LLM06 (excessive agency).
+#
+# Placeholders: NONE — fixed regex.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_privilege_escalation"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_role_grant_to_privileged_{{run_id}}
+    description: "[DIWAN-SUGGESTED] DB write granting admin/superadmin/owner role"
+    priority: 96
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: role grant to privileged role requires authorizing-admin artifact."
+    conditions:
+      - field: target_commands
+        match_type: regex
+        value: "(?i)(insert\\s+into\\s+(public\\.)?(user_roles|roles|permissions|role_assignments)|update\\s+\\w+\\s+set\\s+role\\s*=).*(admin|superadmin|owner|root|sysadmin)"
+
+  - name: block_admin_grant_endpoint_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Outbound to /admin/grant or /role-assign endpoints"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: admin-grant endpoint requires authorizing-admin artifact."
+    conditions:
+      - field: target_paths
+        match_type: regex
+        value: "(?i)/(admin/grant|admin/roles|role[-_]assign|escalate|grant[-_]admin)\\b"
+
+  - name: review_role_impersonation_with_write_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Role-impersonation language paired with write/system intent"
+    priority: 75
+    # HUMAN_REVIEW = observability-only at proxy; Zehrava enforces downstream.
+    action: HUMAN_REVIEW
+    conditions:
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: intent_category
+        match_type: exact
+        value: "system"

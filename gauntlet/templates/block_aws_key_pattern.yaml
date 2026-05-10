@@ -1,0 +1,51 @@
+# diwan-template-block_aws_key_pattern.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Ingress + egress DENY when credential signal fires AND inspector
+#     intent classifier reads the prompt/response as `credential_access`
+#     (the cleanest two-signal AWS-key-shaped block; matches `AKIA...`,
+#     `sk-proj-...`, `sk_live_...`, `ghp_...`, `xoxb-...` via the
+#     CredentialPatterns set).
+#
+# Covers attacks: indirect-injection-echoleak (AWS_ACCESS_KEY beacon),
+# markdown-image-beacon-stripe-key (sk_live), exfil-env-vars-via-webhook
+# (sk-proj + sk_live + postgres URL).
+#
+# OWASP: LLM02.
+#
+# Placeholders: NONE.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_aws_key_pattern"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_credential_intent_ingress_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Credential pattern + credential_access intent — high-confidence key leak shape"
+    priority: 93
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: API key / cloud credential pattern detected."
+    conditions:
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+      - field: intent_category
+        match_type: exact
+        value: "credential_access"
+
+egress_rules:
+  - name: block_credential_intent_egress_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Credential pattern in response with credential_access intent"
+    priority: 93
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: API key / cloud credential pattern."
+    conditions:
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+      - field: intent_category
+        match_type: exact
+        value: "credential_access"

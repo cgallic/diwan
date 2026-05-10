@@ -1,0 +1,74 @@
+# diwan-template-block_destructive_action.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Ingress DENY on prompts whose extracted command slice matches a
+#     destructive shell pattern (rm -rf /, dd, mkfs, chmod 777).
+#   - Ingress DENY on raw destructive SQL/op tokens reaching the gate via
+#     the command extractor (DELETE without WHERE, DROP, TRUNCATE).
+#   - Egress DENY when the response co-occurs `contains_system_commands`
+#     and a non-trivial risk_score — defends against the "agent generates
+#     shell to be executed downstream" surface.
+#
+# Covers attacks: destructive-write-prod-truncate, tool-misuse-destructive-sql,
+# unauth-account-deletion, unauth-privilege-escalation.
+# (cross-attack template — reused 4x)
+#
+# OWASP: LLM06 (excessive agency).
+#
+# Placeholders:
+#   {{detected_metadata.command_pattern}}
+#       Filled by the suggester from the attack's audit log entry — the
+#       specific destructive command/op extracted into `target_commands`
+#       on the failing attack's audit row. Quoted as a regex literal.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_destructive_action"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_destructive_command_pattern_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Destructive command pattern observed during baseline gauntlet"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: destructive command pattern."
+    conditions:
+      - field: target_commands
+        match_type: regex
+        value: "(?i){{detected_metadata.command_pattern}}"
+
+  - name: block_destructive_shell_baseline_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Catastrophic shell command in tool args (rm -rf /, dd, mkfs)"
+    priority: 99
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: catastrophic shell command."
+    conditions:
+      - field: target_commands
+        match_type: regex
+        value: "(?i)\\b(rm\\s+-[a-z]*r[a-z]*f\\s+/|dd\\s+if=|mkfs\\b|chmod\\s+(-R\\s+)?777|drop\\s+table|truncate\\s+table|delete\\s+from\\s+\\w+\\s*;)"
+
+  - name: block_pipe_network_exec_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Network-piped shell execution (curl|bash, wget|sh)"
+    priority: 98
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: network-piped shell execution."
+    conditions:
+      - field: target_commands
+        match_type: regex
+        value: "(?i)\\b(curl|wget)\\b.*\\|"
+
+egress_rules:
+  - name: block_egress_destructive_command_emitted_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Response emits destructive shell command for downstream execution"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: destructive command in response body."
+    conditions:
+      - field: contains_system_commands
+        match_type: boolean
+        value: true
+      - field: risk_score
+        match_type: threshold
+        value: 0.35

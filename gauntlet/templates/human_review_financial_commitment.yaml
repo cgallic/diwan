@@ -1,0 +1,58 @@
+# diwan-template-human_review_financial_commitment.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - HUMAN_REVIEW on egress when the response carries a money-shape signal
+#     (refund / discount / SLA / credit / waive language extracted into
+#     target_commands or matched as PII-request) plus role-impersonation
+#     (an agent issuing a binding-looking commitment).
+#
+# IMPORTANT: HUMAN_REVIEW is observability-only upstream. The Lobster Trap
+# proxy records the verdict but does NOT auto-block (per
+# .build/components/lobstertrap.md). Diwan operationalizes the verdict
+# downstream via Zehrava — the Zehrava UI surfaces the queued review and
+# blocks the underlying tool call there. If you need a hard stop at the
+# proxy, add a parallel rule with action: DENY.
+#
+# Covers attacks: hallucinated-commitment-bereavement-refund, halluc-fake-sla-uptime,
+# halluc-medical-overclaim, halluc-unauthorized-discount, unauth-refund-creation.
+# (cross-attack template — reused 5x; the medical-overclaim attack also gets
+# specialized coverage in human_review_medical_legal_overclaim.yaml.)
+#
+# OWASP: LLM09 (misinformation) + LLM06 (excessive agency).
+#
+# Placeholders: NONE — static template. The financial-language signals come
+# from the inspector's pattern set, not from per-attack metadata.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-human_review_financial_commitment"
+default_action: ALLOW
+
+egress_rules:
+  - name: review_financial_commitment_language_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Response contains commitment language — operator review (Zehrava-surfaced)"
+    priority: 75
+    # HUMAN_REVIEW = observability-only at proxy; Zehrava enforces downstream.
+    action: HUMAN_REVIEW
+    conditions:
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: intent_category
+        match_type: exact
+        value: "communication"
+
+  - name: review_high_risk_communication_{{run_id}}
+    description: "[DIWAN-SUGGESTED] High-risk communication output — operator review"
+    priority: 74
+    # HUMAN_REVIEW = observability-only at proxy; Zehrava enforces downstream.
+    action: HUMAN_REVIEW
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "communication"
+      - field: risk_score
+        match_type: threshold
+        value: 0.4

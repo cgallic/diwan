@@ -1,0 +1,43 @@
+# diwan-template-human_review_fake_sla.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Egress HUMAN_REVIEW when the response carries communication intent
+#     and role-impersonation signal (chatbot speaking as the company),
+#     and the inspector's risk_score crosses the moderate floor — the
+#     "agent invents a 99.9% uptime SLA" shape.
+#
+# IMPORTANT: HUMAN_REVIEW is observability-only at the Lobster Trap proxy
+# (per .build/components/lobstertrap.md). Diwan operationalizes via Zehrava:
+# Zehrava holds the Stripe / DB write that would commit the SLA in a queue
+# and surfaces the proposed commitment for operator approval.
+#
+# Covers attacks: halluc-fake-sla-uptime.
+#
+# OWASP: LLM09 (misinformation as binding commitment — Air Canada precedent).
+#
+# Placeholders: NONE.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-human_review_fake_sla"
+default_action: ALLOW
+
+egress_rules:
+  - name: review_sla_commitment_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Communication output with role-impersonation + risk floor — operator review"
+    priority: 76
+    # HUMAN_REVIEW = observability-only at proxy; Zehrava enforces downstream
+    # by holding the underlying send_email / db_write tool call.
+    action: HUMAN_REVIEW
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "communication"
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: risk_score
+        match_type: threshold
+        value: 0.3

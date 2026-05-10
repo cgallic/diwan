@@ -1,0 +1,43 @@
+# diwan-template-block_account_deletion.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Ingress DENY when the prompt's command-extractor catches a DELETE /
+#     DROP statement targeting `users` (or other identity tables) without
+#     a soft-delete flag, OR an `op=delete` row-shape against the users
+#     table. Because Lobster Trap regex must run against `target_commands`
+#     rather than free text, we pattern-match the specific shapes the
+#     command extractor pulls out.
+#
+# Covers attacks: unauth-account-deletion.
+#
+# OWASP: LLM06 (excessive agency — destructive privileged action).
+#
+# Placeholders: NONE — fixed regex on the command slice.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_account_deletion"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_user_table_hard_delete_{{run_id}}
+    description: "[DIWAN-SUGGESTED] DELETE / DROP against users / accounts / customers identity tables"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: hard delete on identity table requires soft-delete + two-person approval."
+    conditions:
+      - field: target_commands
+        match_type: regex
+        value: "(?i)\\b(delete\\s+from|drop\\s+table|truncate(\\s+table)?)\\s+(public\\.)?(users|user|accounts|account|customers|customer|members|profiles)\\b"
+
+  - name: block_destructive_user_op_{{run_id}}
+    description: "[DIWAN-SUGGESTED] op=delete payload against identity entity"
+    priority: 94
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: destructive op against identity entity."
+    conditions:
+      - field: target_commands
+        match_type: regex
+        value: "(?i)op\\s*[:=]\\s*['\"]?(delete|truncate|drop)['\"]?.*\\b(users|accounts|customers|members)\\b"

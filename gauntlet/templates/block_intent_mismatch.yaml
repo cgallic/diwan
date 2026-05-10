@@ -1,0 +1,80 @@
+# diwan-template-block_intent_mismatch.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Egress DENY when the inspector's `intent_category` (DPI-detected from
+#     the response body) is in the high-risk set and `intent_confidence` is
+#     above floor — this catches "agent declared support_response, payload
+#     is data_access / credential_access / system" (the EchoLeak,
+#     export-as-summary, and fake-rollback shapes).
+#
+# How declared-vs-detected actually works in Lobster Trap:
+#   - The agent sends `_lobstertrap.declared_intent` in the request body.
+#   - The proxy compares declared vs DPI-detected and emits a `Mismatch`
+#     entry in `_lobstertrap.ingress.mismatches` (severity warning|critical).
+#   - But: mismatches do NOT auto-block. We have to write a rule on the
+#     downstream signal that fires when the detected intent diverges from
+#     a benign declared one. We do that here by gating on
+#     `intent_category` against the high-risk set.
+#
+# Covers attacks: intent-mismatch-export-as-summary, tool-spoof-fake-rollback.
+#
+# OWASP: LLM06 (excessive agency).
+#
+# Placeholders:
+#   {{detected_metadata.high_risk_intents}}
+#       Filled by the suggester. The suggester writes a SEPARATE rule per
+#       intent in the high-risk set (since Lobster Trap match_type=exact
+#       does not accept lists). The default high-risk set is:
+#         credential_access, system, data_access
+#       The placeholder below is a comment-only marker; the suggester
+#       expands it into N rules at instantiate time. The first rule is
+#       a representative; copy + change `value:` for each intent.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_intent_mismatch"
+default_action: ALLOW
+
+egress_rules:
+  # Suggester instantiates one rule per intent in
+  # {{detected_metadata.high_risk_intents}} = [credential_access, system, data_access]
+  - name: block_egress_intent_credential_access_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Detected egress intent=credential_access (declared-vs-detected mismatch shape)"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: detected intent in high-risk set ({{detected_metadata.high_risk_intents}})."
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "credential_access"
+      - field: intent_confidence
+        match_type: threshold
+        value: 0.5
+
+  - name: block_egress_intent_system_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Detected egress intent=system (declared-vs-detected mismatch shape)"
+    priority: 94
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: detected intent in high-risk set ({{detected_metadata.high_risk_intents}})."
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "system"
+      - field: intent_confidence
+        match_type: threshold
+        value: 0.5
+
+  - name: block_egress_intent_data_access_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Detected egress intent=data_access (declared-vs-detected mismatch shape)"
+    priority: 93
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: detected intent in high-risk set ({{detected_metadata.high_risk_intents}})."
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "data_access"
+      - field: intent_confidence
+        match_type: threshold
+        value: 0.5

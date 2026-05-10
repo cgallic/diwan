@@ -1,0 +1,57 @@
+# diwan-template-human_review_unauthorized_discount.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Ingress LOG on data_access intent with PII-request signal — the
+#     "match competitor 50% off and apply to my invoice" surface tends to
+#     pair customer-account lookup with a discount commitment.
+#   - Egress HUMAN_REVIEW when communication intent fires alongside
+#     role_impersonation and a risk floor, AND the response also flags
+#     `contains_pii` — chatbot quoting account-specific discount commitments
+#     hits both signals.
+#
+# IMPORTANT: HUMAN_REVIEW is observability-only at the Lobster Trap proxy.
+# Zehrava enforces downstream by holding the api_post('/discounts', ...) /
+# db_write commitment in queue.
+#
+# Covers attacks: halluc-unauthorized-discount.
+#
+# OWASP: LLM09.
+#
+# Placeholders: NONE.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-human_review_unauthorized_discount"
+default_action: ALLOW
+
+ingress_rules:
+  - name: log_discount_request_intent_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Audit-log discount/credit request prompt for trace replay"
+    priority: 32
+    action: LOG
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "data_access"
+      - field: contains_pii_request
+        match_type: boolean
+        value: true
+
+egress_rules:
+  - name: review_account_specific_commitment_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Account-specific commitment language — operator review (Zehrava holds tool call)"
+    priority: 76
+    # HUMAN_REVIEW = observability-only at proxy; Zehrava enforces downstream.
+    action: HUMAN_REVIEW
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "communication"
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: contains_pii
+        match_type: boolean
+        value: true

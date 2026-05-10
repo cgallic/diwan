@@ -1,0 +1,53 @@
+# diwan-template-block_role_override_injection.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Ingress DENY when both `contains_injection_patterns` (DAN, SYSTEM:,
+#     "ignore previous", BEGIN SYSTEM PROMPT) AND
+#     `contains_role_impersonation` ("you are now ...", "act as root user")
+#     fire. The conjunction filters out benign mentions of these tokens
+#     in tutorials / docs.
+#   - Ingress DENY on the high-risk composite (role-impersonation + system
+#     intent) — catches role-override prompts whose injection markers
+#     don't match the inspector's specific patterns but whose intent
+#     classifier still lands on `system`.
+#
+# Covers attacks: prompt-injection-role-override.
+# (Augments the broader block_indirect_injection template.)
+#
+# OWASP: LLM01 + LLM07.
+#
+# Placeholders: NONE.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_role_override_injection"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_role_override_compound_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Injection markers + role-impersonation in same prompt (DAN / SYSTEM frame)"
+    priority: 99
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: role-override prompt injection (DAN / SYSTEM frame)."
+    conditions:
+      - field: contains_injection_patterns
+        match_type: boolean
+        value: true
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+
+  - name: block_role_override_system_intent_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Role-impersonation + system intent (privileged-role takeover)"
+    priority: 98
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: privileged-role impersonation with system intent."
+    conditions:
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: intent_category
+        match_type: exact
+        value: "system"

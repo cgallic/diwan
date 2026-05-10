@@ -1,0 +1,65 @@
+# diwan-template-block_external_exfiltration.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Egress DENY when the inspector extracts a target domain matching the
+#     attacker host pulled from the failed attack's audit log.
+#   - Egress DENY when the response co-occurs `contains_urls` and
+#     `contains_exfiltration` (the markdown-image / webhook beacon pattern
+#     — Rehberger 2024, EchoLeak primary egress channel).
+#   - Egress DENY when `contains_credentials` fires alongside `contains_urls`
+#     (secret-in-URL / DNS-tunnel shape).
+#
+# Covers attacks: exfil-customer-emails-bulk, exfil-dns-tunnel-beacon,
+# exfil-env-vars-via-webhook, markdown-image-beacon-stripe-key.
+#
+# OWASP: LLM02 (sensitive information disclosure).
+#
+# Placeholders:
+#   {{detected_metadata.target_domain}}
+#       Filled by the suggester from the attack's audit log entry — pulled
+#       from `metadata.target_domains[0]` of the egress audit row that
+#       triggered DENY (or the host from the attack's wired_endpoints).
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_external_exfiltration"
+default_action: ALLOW
+
+egress_rules:
+  - name: block_exfil_to_known_attacker_domain_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Egress to attacker domain observed during baseline gauntlet"
+    priority: 100
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: external exfiltration to {{detected_metadata.target_domain}}"
+    conditions:
+      - field: target_domains
+        match_type: regex
+        value: "(?i){{detected_metadata.target_domain}}"
+
+  - name: block_egress_url_exfil_pattern_{{run_id}}
+    description: "[DIWAN-SUGGESTED] URL + exfiltration intent in response (markdown-image / webhook beacon)"
+    priority: 99
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: URL + exfiltration shape (image-tag / webhook beacon)."
+    conditions:
+      - field: contains_urls
+        match_type: boolean
+        value: true
+      - field: contains_exfiltration
+        match_type: boolean
+        value: true
+
+  - name: block_egress_credential_in_url_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Credential pattern co-occurring with outbound URL (DNS-tunnel / secret-in-URL)"
+    priority: 98
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: credential material in outbound URL."
+    conditions:
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+      - field: contains_urls
+        match_type: boolean
+        value: true

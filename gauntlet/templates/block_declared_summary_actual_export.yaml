@@ -1,0 +1,65 @@
+# diwan-template-block_declared_summary_actual_export.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Egress DENY when the inspector's detected intent is `data_access`
+#     (response payload is a bulk-export shape) AND the response token
+#     count crosses the bulk-payload floor — the "agent declared
+#     support_reply but emitted a thousand-row export" surface.
+#
+# Lobster Trap declared-vs-detected behavior:
+#   - The agent's `_lobstertrap.declared_intent="support_response"` lands
+#     in `_lobstertrap.ingress.declared` and the proxy emits a Mismatch
+#     in `_lobstertrap.ingress.mismatches` when DPI detects a different
+#     intent. Mismatches do NOT auto-block; we have to write a downstream
+#     rule on detected-side signals (intent_category, token_count,
+#     contains_pii) which IS what these rules do.
+#
+# Covers attacks: intent-mismatch-export-as-summary.
+#
+# OWASP: LLM06.
+#
+# Placeholders: NONE — the bulk floor (token_count threshold) is a
+# corpus-wide default; tune via D3 if it false-positives on real summaries.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_declared_summary_actual_export"
+default_action: ALLOW
+
+egress_rules:
+  - name: block_bulk_export_in_communication_response_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Bulk data-access payload in a response declared as a summary"
+    priority: 96
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: declared-vs-detected intent mismatch (bulk export disguised as reply)."
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "data_access"
+      - field: token_count
+        match_type: threshold
+        value: 800
+
+  - name: block_pii_density_in_response_{{run_id}}
+    description: "[DIWAN-SUGGESTED] High-density PII (multi-row email/customer dump) in response"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: bulk PII density in response body."
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+      - field: token_count
+        match_type: threshold
+        value: 800
+
+  - name: log_intent_mismatch_observability_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Audit-log every data_access egress for trace replay"
+    priority: 30
+    action: LOG
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "data_access"

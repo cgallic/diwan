@@ -1,0 +1,64 @@
+# diwan-template-human_review_medical_legal_overclaim.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Egress HUMAN_REVIEW when the response carries communication intent +
+#     role-impersonation (the agent speaking AS a clinician / attorney) and
+#     the risk_score crosses a moderate floor.
+#   - Egress LOG on PII-request signal in the response (dosage, condition,
+#     diagnosis-shaped output tends to surface PII patterns from prior
+#     turns) so trace replay shows the full conversation.
+#
+# IMPORTANT: HUMAN_REVIEW is observability-only at the Lobster Trap proxy.
+# Diwan's safe path: Zehrava replaces the model output with a "consult a
+# clinician / consult an attorney" template and surfaces the proposed
+# response for review. The proxy verdict is the trigger; the substitution
+# happens at Zehrava.
+#
+# Lobster Trap caveat: there is no medical/legal-specific pattern set in
+# the inspector. We therefore lean on intent_category=communication +
+# role_impersonation + risk_score to approximate the shape. This is a
+# coarser block than the financial cases — flag for D3 to consider whether
+# a medical/legal pattern-set extension to the inspector is needed.
+#
+# Covers attacks: halluc-medical-overclaim.
+#
+# OWASP: LLM09.
+#
+# Placeholders: NONE.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-human_review_medical_legal_overclaim"
+default_action: ALLOW
+
+egress_rules:
+  - name: review_clinical_legal_advice_shape_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Possible off-label clinical/legal advice — operator review (Zehrava substitutes safe template)"
+    priority: 78
+    # HUMAN_REVIEW = observability-only at proxy; Zehrava substitutes with
+    # a "consult a clinician / consult an attorney" template downstream.
+    action: HUMAN_REVIEW
+    conditions:
+      - field: intent_category
+        match_type: exact
+        value: "communication"
+      - field: contains_role_impersonation
+        match_type: boolean
+        value: true
+      - field: risk_score
+        match_type: threshold
+        value: 0.4
+
+  - name: log_pii_in_advice_response_{{run_id}}
+    description: "[DIWAN-SUGGESTED] PII surfaced in a possibly-clinical response — audit replay"
+    priority: 32
+    action: LOG
+    conditions:
+      - field: contains_pii
+        match_type: boolean
+        value: true
+      - field: intent_category
+        match_type: exact
+        value: "communication"

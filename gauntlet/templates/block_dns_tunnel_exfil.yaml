@@ -1,0 +1,59 @@
+# diwan-template-block_dns_tunnel_exfil.yaml
+# ----------------------------------------------------------------------------
+# Lobster Trap policy template — Diwan-suggested.
+#
+# Shape:
+#   - Ingress DENY when extracted domain contains a credential-shaped
+#     subdomain (sk_, AKIA, ghp_, sk-proj, sk_live) — the DNS-tunnel
+#     exfiltration shape where a secret is encoded into the leftmost
+#     label and leaked via the attacker-controlled nameserver.
+#   - Egress DENY on the same pattern in the response body's extracted
+#     domains slice.
+#
+# Covers attacks: exfil-dns-tunnel-beacon.
+#
+# OWASP: LLM02.
+#
+# Placeholders:
+#   {{detected_metadata.target_domain}}
+#       The attacker DNS apex pulled from the failing attack's audit log.
+# ----------------------------------------------------------------------------
+
+version: "1.0"
+policy_name: "diwan-template-block_dns_tunnel_exfil"
+default_action: ALLOW
+
+ingress_rules:
+  - name: block_secret_in_subdomain_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Secret-shaped token in subdomain label (DNS tunnel exfil)"
+    priority: 96
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: secret-shaped token in DNS subdomain."
+    conditions:
+      - field: target_domains
+        match_type: regex
+        value: "(?i)(sk-proj-|sk_live_|sk_test_|AKIA[0-9A-Z]{16}|ghp_|gho_|github_pat_|xoxb-|xoxp-)[A-Za-z0-9_-]+\\..+"
+
+  - name: block_attacker_apex_with_credential_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Outbound to baseline attacker apex paired with credential signal"
+    priority: 95
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Blocked: outbound to {{detected_metadata.target_domain}} with credential payload."
+    conditions:
+      - field: target_domains
+        match_type: regex
+        value: "(?i){{detected_metadata.target_domain}}"
+      - field: contains_credentials
+        match_type: boolean
+        value: true
+
+egress_rules:
+  - name: block_egress_secret_in_subdomain_{{run_id}}
+    description: "[DIWAN-SUGGESTED] Response emits URL with secret-shaped subdomain"
+    priority: 96
+    action: DENY
+    deny_message: "[DIWAN-SUGGESTED] Output blocked: secret-shaped DNS label."
+    conditions:
+      - field: target_domains
+        match_type: regex
+        value: "(?i)(sk-proj-|sk_live_|sk_test_|AKIA[0-9A-Z]{16}|ghp_|gho_|github_pat_|xoxb-|xoxp-)[A-Za-z0-9_-]+\\..+"
