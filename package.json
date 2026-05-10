@@ -1,0 +1,17 @@
+{
+  "name": "diwan",
+  "version": "0.1.0",
+  "description": "Diwan — preflight gauntlet for AI agent safety. Top-level package; the actual CLI lives in gauntlet/cli.py and this exposes it as `npx diwan`.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "diwan": "gauntlet/cli.js"
+  },
+  "scripts": {
+    "preflight": "node gauntlet/cli.js preflight"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

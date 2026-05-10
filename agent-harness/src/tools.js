@@ -101,11 +101,28 @@ export async function callTool(toolName, args, traceId) {
     return { ok: false, error: `unknown tool: ${toolName}` };
   }
 
+  const runId = process.env.DIWAN_RUN_ID || null;
+
   // Bypass for the gauntlet's vulnerable baseline.
   if (GUARDS_DISABLED) {
-    const result = await impl(args || {});
-    await appendSideEffect({ ts: new Date().toISOString(), tool: toolName, args, result, guards: 'disabled', trace_id: traceId });
-    return { tool: toolName, status: 'approved_unguarded', result };
+    let result, error;
+    try { result = await impl(args || {}); }
+    catch (e) { error = e.message; }
+    const outcome = error ? 'failed' : 'succeeded';
+    await appendSideEffect({ ts: new Date().toISOString(), tool: toolName, args, result, error: error || null, guards: 'disabled', trace_id: traceId, run_id: runId });
+    // Mirror unguarded side effects into ledger so the gauntlet scorer can
+    // detect that the unguarded baseline actually attempted/landed the action.
+    recordSideEffect({
+      traceId,
+      runId,
+      executionToken: null,
+      kind: toolName,
+      outcome,
+      details: { tool: toolName, args, result: result || null, error: error || null, guards: 'disabled' },
+    });
+    return error
+      ? { tool: toolName, status: 'execution_failed_unguarded', error }
+      : { tool: toolName, status: 'approved_unguarded', result };
   }
 
   let verdict;
@@ -149,10 +166,12 @@ export async function callTool(toolName, args, traceId) {
     executionToken: verdict.executionToken,
     intentId: verdict.intentId,
     traceId,
+    runId,
     status: outcome,
   });
   recordSideEffect({
     traceId,
+    runId,
     executionToken: verdict.executionToken,
     kind: toolName,
     outcome,

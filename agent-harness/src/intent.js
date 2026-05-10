@@ -126,9 +126,11 @@ export async function submitIntent(toolName, args, traceId) {
   // Mirror intent into /data/diwan.db. Use the dotted tool name as the
   // destination so the demo ledger stays human-readable; Zehrava's view of
   // `intercom.reply` etc. lives in /data/gate.db separately.
+  const runId = process.env.DIWAN_RUN_ID || null;
   recordIntent({
     intentId,
     traceId,
+    runId,
     agentId,
     destination: toolName,
     payload: wireBody.payload,
@@ -146,6 +148,7 @@ export async function submitIntent(toolName, args, traceId) {
       executionToken,
       intentId,
       traceId,
+      runId,
       status: 'issued',
     });
   }
