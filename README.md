@@ -136,3 +136,8 @@ Built on [Lobster Trap](https://github.com/veeainc/lobstertrap) (Veea, MIT) and 
 ## Status
 
 Hackathon submission for [TechEx Intelligent Enterprise Solutions Hackathon](https://lablab.ai/ai-hackathons/techex-intelligent-enterprise-solutions-hackathon) (May 11–19, 2026). Track 1 (Agent Security & AI Governance, sponsored by Veea), Track 2 reference (Google AI Studio).
+
+
+---
+
+*Built and maintained by [Connor Gallic](https://pr.linkedin.com/in/cgallic) — connect on LinkedIn.*
